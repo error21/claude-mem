@@ -84,7 +84,7 @@ export interface ExtendedSearchOptions extends SearchOptions {
 /**
  * Search strategy selection hint
  */
-export type SearchStrategyHint = 'chroma' | 'sqlite' | 'hybrid' | 'auto';
+export type SearchStrategyHint = 'chroma' | 'sqlite' | 'hybrid' | 'pgvector' | 'auto';
 
 /**
  * Options passed to search strategies

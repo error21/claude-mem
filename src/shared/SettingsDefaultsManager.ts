@@ -68,6 +68,24 @@ export interface SettingsDefaults {
   CLAUDE_MEM_CHROMA_API_KEY: string;
   CLAUDE_MEM_CHROMA_TENANT: string;
   CLAUDE_MEM_CHROMA_DATABASE: string;
+  // Storage Provider Configuration
+  CLAUDE_MEM_STORAGE_PROVIDER: string;  // 'sqlite' | 'postgresql' - storage backend selection
+  // PostgreSQL Connection Configuration
+  CLAUDE_MEM_PG_HOST: string;
+  CLAUDE_MEM_PG_PORT: string;
+  CLAUDE_MEM_PG_DATABASE: string;
+  CLAUDE_MEM_PG_USER: string;
+  CLAUDE_MEM_PG_PASSWORD: string;
+  CLAUDE_MEM_PG_SSL: string;           // 'true' | 'false' - enable SSL for PostgreSQL connection
+  CLAUDE_MEM_PG_CONNECTION_STRING: string;  // Full connection string (overrides individual params)
+  // PostgreSQL Connection Pool Configuration
+  CLAUDE_MEM_PG_POOL_MIN: string;
+  CLAUDE_MEM_PG_POOL_MAX: string;
+  // Embedding Provider Configuration
+  CLAUDE_MEM_EMBEDDING_PROVIDER: string;  // 'local' | 'openai' | 'voyage' - embedding generation backend
+  CLAUDE_MEM_EMBEDDING_API_KEY: string;   // API key for OpenAI or Voyage embedding provider
+  CLAUDE_MEM_EMBEDDING_MODEL: string;     // Model name override (provider-specific)
+  CLAUDE_MEM_EMBEDDING_DIMENSIONS: string; // Vector dimensions override
 }
 
 export class SettingsDefaultsManager {
@@ -130,6 +148,24 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_CHROMA_API_KEY: '',
     CLAUDE_MEM_CHROMA_TENANT: 'default_tenant',
     CLAUDE_MEM_CHROMA_DATABASE: 'default_database',
+    // Storage Provider Configuration
+    CLAUDE_MEM_STORAGE_PROVIDER: 'sqlite',  // Default to SQLite for backward compatibility
+    // PostgreSQL Connection Configuration
+    CLAUDE_MEM_PG_HOST: '127.0.0.1',
+    CLAUDE_MEM_PG_PORT: '5432',
+    CLAUDE_MEM_PG_DATABASE: 'claude_mem',
+    CLAUDE_MEM_PG_USER: '',
+    CLAUDE_MEM_PG_PASSWORD: '',
+    CLAUDE_MEM_PG_SSL: 'false',
+    CLAUDE_MEM_PG_CONNECTION_STRING: '',  // Empty means use individual params
+    // PostgreSQL Connection Pool Configuration
+    CLAUDE_MEM_PG_POOL_MIN: '2',
+    CLAUDE_MEM_PG_POOL_MAX: '10',
+    // Embedding Provider Configuration
+    CLAUDE_MEM_EMBEDDING_PROVIDER: 'local',  // Default to local ONNX inference (no API key needed)
+    CLAUDE_MEM_EMBEDDING_API_KEY: '',         // Required for openai/voyage providers
+    CLAUDE_MEM_EMBEDDING_MODEL: '',           // Empty = use provider default
+    CLAUDE_MEM_EMBEDDING_DIMENSIONS: '',      // Empty = use provider default
   };
 
   /**

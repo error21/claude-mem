@@ -16,6 +16,7 @@ import { ChromaSync } from '../../sync/ChromaSync.js';
 import { ChromaSearchStrategy } from './strategies/ChromaSearchStrategy.js';
 import { SQLiteSearchStrategy } from './strategies/SQLiteSearchStrategy.js';
 import { HybridSearchStrategy } from './strategies/HybridSearchStrategy.js';
+import { PgvectorSearchStrategy } from './strategies/PgvectorSearchStrategy.js';
 
 import { ResultFormatter } from './ResultFormatter.js';
 import { TimelineBuilder } from './TimelineBuilder.js';
@@ -30,6 +31,8 @@ import type {
   SearchResults,
   ObservationSearchResult
 } from './types.js';
+import type { IStorageRepository } from '../../storage/interfaces.js';
+import type { IEmbeddingProvider } from '../../storage/embedding/IEmbeddingProvider.js';
 import { logger } from '../../../utils/logger.js';
 
 /**
@@ -45,18 +48,28 @@ export class SearchOrchestrator {
   private chromaStrategy: ChromaSearchStrategy | null = null;
   private sqliteStrategy: SQLiteSearchStrategy;
   private hybridStrategy: HybridSearchStrategy | null = null;
+  private pgvectorStrategy: PgvectorSearchStrategy | null = null;
   private resultFormatter: ResultFormatter;
   private timelineBuilder: TimelineBuilder;
+  private storageProvider: 'sqlite' | 'postgresql';
 
   constructor(
     private sessionSearch: SessionSearch,
     private sessionStore: SessionStore,
-    private chromaSync: ChromaSync | null
+    private chromaSync: ChromaSync | null,
+    repository?: IStorageRepository,
+    embeddingProvider?: IEmbeddingProvider
   ) {
-    // Initialize strategies
+    this.storageProvider = repository?.providerName ?? 'sqlite';
+
+    // Initialize strategies based on storage provider
     this.sqliteStrategy = new SQLiteSearchStrategy(sessionSearch);
 
-    if (chromaSync) {
+    if (this.storageProvider === 'postgresql' && repository && embeddingProvider) {
+      this.pgvectorStrategy = new PgvectorSearchStrategy(repository, embeddingProvider);
+      logger.info('SEARCH', 'PostgreSQL provider active - PgvectorSearchStrategy registered');
+    } else if (chromaSync) {
+      // SQLite provider with Chroma: use existing strategies
       this.chromaStrategy = new ChromaSearchStrategy(chromaSync, sessionStore);
       this.hybridStrategy = new HybridSearchStrategy(chromaSync, sessionStore, sessionSearch);
     }
@@ -81,6 +94,12 @@ export class SearchOrchestrator {
   private async executeWithFallback(
     options: NormalizedParams
   ): Promise<StrategySearchResult> {
+    // PATH 0: PGVECTOR (PostgreSQL provider with embedding support)
+    if (this.pgvectorStrategy) {
+      logger.debug('SEARCH', 'Orchestrator: Using PgvectorSearchStrategy', {});
+      return await this.pgvectorStrategy.search(options);
+    }
+
     // PATH 1: FILTER-ONLY (no query text) - Use SQLite
     if (!options.query) {
       logger.debug('SEARCH', 'Orchestrator: Filter-only query, using SQLite', {});
@@ -126,6 +145,10 @@ export class SearchOrchestrator {
   async findByConcept(concept: string, args: any): Promise<StrategySearchResult> {
     const options = this.normalizeParams(args);
 
+    if (this.pgvectorStrategy) {
+      return await this.pgvectorStrategy.search({ ...options, query: concept, concepts: [concept] });
+    }
+
     if (this.hybridStrategy) {
       return await this.hybridStrategy.findByConcept(concept, options);
     }
@@ -145,6 +168,11 @@ export class SearchOrchestrator {
    */
   async findByType(type: string | string[], args: any): Promise<StrategySearchResult> {
     const options = this.normalizeParams(args);
+
+    if (this.pgvectorStrategy) {
+      const types = Array.isArray(type) ? type : [type];
+      return await this.pgvectorStrategy.search({ ...options, obsType: types });
+    }
 
     if (this.hybridStrategy) {
       return await this.hybridStrategy.findByType(type, options);
@@ -169,6 +197,15 @@ export class SearchOrchestrator {
     usedChroma: boolean;
   }> {
     const options = this.normalizeParams(args);
+
+    if (this.pgvectorStrategy) {
+      const result = await this.pgvectorStrategy.search({ ...options, files: [filePath] });
+      return {
+        observations: result.results.observations,
+        sessions: result.results.sessions,
+        usedChroma: false,
+      };
+    }
 
     if (this.hybridStrategy) {
       return await this.hybridStrategy.findByFile(filePath, options);

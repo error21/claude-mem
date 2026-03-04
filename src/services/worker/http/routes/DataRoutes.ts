@@ -60,6 +60,9 @@ export class DataRoutes extends BaseRouteHandler {
 
     // Import endpoint
     app.post('/api/import', this.handleImport.bind(this));
+
+    // Migration status endpoint (embedding backfill progress)
+    app.get('/api/migration/status', this.handleGetMigrationStatus.bind(this));
   }
 
   /**
@@ -471,6 +474,33 @@ export class DataRoutes extends BaseRouteHandler {
     res.json({
       success: true,
       clearedCount
+    });
+  });
+
+  /**
+   * Get migration/embedding backfill status.
+   * Returns embedding progress for PostgreSQL provider.
+   */
+  private handleGetMigrationStatus = this.wrapHandler(async (req: Request, res: Response): Promise<void> => {
+    const repo = this.dbManager.getRepository();
+    const providerName = repo.providerName;
+
+    if (providerName !== 'postgresql') {
+      res.json({
+        provider: 'sqlite',
+        embeddingBackfill: null,
+        message: 'Embedding backfill only applies to PostgreSQL provider',
+      });
+      return;
+    }
+
+    // Query observation count as a proxy for total records
+    const totalObservations = await repo.observations.getObservationCount();
+
+    res.json({
+      provider: 'postgresql',
+      totalObservations,
+      message: 'PostgreSQL storage active',
     });
   });
 }

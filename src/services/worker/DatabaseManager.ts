@@ -3,7 +3,7 @@
  *
  * Responsibility:
  * - Manage single database connection for worker lifetime
- * - Provide centralized access to SessionStore and SessionSearch
+ * - Provide centralized access to SessionStore, SessionSearch, and IStorageRepository
  * - High-level database operations
  * - ChromaSync integration
  */
@@ -11,34 +11,48 @@
 import { SessionStore } from '../sqlite/SessionStore.js';
 import { SessionSearch } from '../sqlite/SessionSearch.js';
 import { ChromaSync } from '../sync/ChromaSync.js';
-import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
+import { SettingsDefaultsManager, type SettingsDefaults } from '../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 import { logger } from '../../utils/logger.js';
 import type { DBSession } from '../worker-types.js';
+import type { IStorageRepository } from '../storage/interfaces.js';
+import { StorageProviderFactory } from '../storage/StorageProviderFactory.js';
 
 export class DatabaseManager {
   private sessionStore: SessionStore | null = null;
   private sessionSearch: SessionSearch | null = null;
   private chromaSync: ChromaSync | null = null;
+  private repository: IStorageRepository | null = null;
 
   /**
    * Initialize database connection (once, stays open)
    */
   async initialize(): Promise<void> {
-    // Open database connection (ONCE)
-    this.sessionStore = new SessionStore();
-    this.sessionSearch = new SessionSearch();
-
-    // Initialize ChromaSync only if Chroma is enabled (SQLite-only fallback when disabled)
     const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+    const provider = settings.CLAUDE_MEM_STORAGE_PROVIDER || 'sqlite';
+
+    // Create repository via factory (handles SQLite vs PostgreSQL selection)
+    this.repository = await StorageProviderFactory.create(settings);
+
+    // For SQLite provider, also create legacy SessionStore/SessionSearch
+    // (needed for backward compatibility with worker-service.ts call sites)
+    if (provider !== 'postgresql') {
+      this.sessionStore = new SessionStore();
+      this.sessionSearch = new SessionSearch();
+    }
+
+    // Initialize ChromaSync only if Chroma is enabled and using SQLite
+    // (PostgreSQL uses pgvector for vector search, doesn't need ChromaSync)
     const chromaEnabled = settings.CLAUDE_MEM_CHROMA_ENABLED !== 'false';
-    if (chromaEnabled) {
+    if (chromaEnabled && provider !== 'postgresql') {
       this.chromaSync = new ChromaSync('claude-mem');
+    } else if (provider === 'postgresql') {
+      logger.info('DB', 'PostgreSQL provider active, ChromaSync disabled (using pgvector)');
     } else {
       logger.info('DB', 'Chroma disabled via CLAUDE_MEM_CHROMA_ENABLED=false, using SQLite-only search');
     }
 
-    logger.info('DB', 'Database initialized');
+    logger.info('DB', `Database initialized (provider: ${this.repository.providerName})`);
   }
 
   /**
@@ -51,19 +65,41 @@ export class DatabaseManager {
       this.chromaSync = null;
     }
 
-    if (this.sessionStore) {
-      this.sessionStore.close();
+    // Close via repository if available (it owns the connection)
+    if (this.repository) {
+      await this.repository.close();
+      this.repository = null;
+      // Clear sessionStore/sessionSearch references (connection closed by repository)
       this.sessionStore = null;
-    }
-    if (this.sessionSearch) {
-      this.sessionSearch.close();
       this.sessionSearch = null;
+    } else {
+      // Fallback: close directly if repository not yet initialized
+      if (this.sessionStore) {
+        this.sessionStore.close();
+        this.sessionStore = null;
+      }
+      if (this.sessionSearch) {
+        this.sessionSearch.close();
+        this.sessionSearch = null;
+      }
     }
     logger.info('DB', 'Database closed');
   }
 
   /**
+   * Get the IStorageRepository interface (throws if not initialized).
+   * Prefer this over getSessionStore() for new code.
+   */
+  getRepository(): IStorageRepository {
+    if (!this.repository) {
+      throw new Error('Database not initialized');
+    }
+    return this.repository;
+  }
+
+  /**
    * Get SessionStore instance (throws if not initialized)
+   * @deprecated Use getRepository() for new code. Kept for backward compatibility.
    */
   getSessionStore(): SessionStore {
     if (!this.sessionStore) {
@@ -74,6 +110,7 @@ export class DatabaseManager {
 
   /**
    * Get SessionSearch instance (throws if not initialized)
+   * @deprecated Use getRepository().search for new code. Kept for backward compatibility.
    */
   getSessionSearch(): SessionSearch {
     if (!this.sessionSearch) {
