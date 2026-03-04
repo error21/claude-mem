@@ -13,16 +13,117 @@ import { join } from 'path';
 
 // Mock modules that cause import chain issues - MUST be before handler imports
 // paths.ts calls SettingsDefaultsManager.get() at module load time
-mock.module('../../src/shared/SettingsDefaultsManager.js', () => ({
-  SettingsDefaultsManager: {
-    get: (key: string) => {
-      if (key === 'CLAUDE_MEM_DATA_DIR') return join(homedir(), '.claude-mem');
-      return '';
+mock.module('../../src/shared/SettingsDefaultsManager.js', () => {
+  // Must provide ALL static methods AND complete defaults to avoid breaking
+  // other tests when Bun runs files in the same process (mock.module is global).
+  const DEFAULTS: Record<string, string> = {
+    CLAUDE_MEM_MODEL: 'claude-sonnet-4-5',
+    CLAUDE_MEM_CONTEXT_OBSERVATIONS: '50',
+    CLAUDE_MEM_WORKER_PORT: '37777',
+    CLAUDE_MEM_WORKER_HOST: '127.0.0.1',
+    CLAUDE_MEM_SKIP_TOOLS: 'ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion',
+    CLAUDE_MEM_PROVIDER: 'claude',
+    CLAUDE_MEM_CLAUDE_AUTH_METHOD: 'cli',
+    CLAUDE_MEM_GEMINI_API_KEY: '',
+    CLAUDE_MEM_GEMINI_MODEL: 'gemini-2.5-flash-lite',
+    CLAUDE_MEM_GEMINI_RATE_LIMITING_ENABLED: 'true',
+    CLAUDE_MEM_OPENROUTER_API_KEY: '',
+    CLAUDE_MEM_OPENROUTER_MODEL: 'xiaomi/mimo-v2-flash:free',
+    CLAUDE_MEM_OPENROUTER_SITE_URL: '',
+    CLAUDE_MEM_OPENROUTER_APP_NAME: 'claude-mem',
+    CLAUDE_MEM_OPENROUTER_MAX_CONTEXT_MESSAGES: '20',
+    CLAUDE_MEM_OPENROUTER_MAX_TOKENS: '100000',
+    CLAUDE_MEM_DATA_DIR: join(homedir(), '.claude-mem'),
+    CLAUDE_MEM_LOG_LEVEL: 'INFO',
+    CLAUDE_MEM_PYTHON_VERSION: '3.13',
+    CLAUDE_CODE_PATH: '',
+    CLAUDE_MEM_MODE: 'code',
+    CLAUDE_MEM_CONTEXT_SHOW_READ_TOKENS: 'false',
+    CLAUDE_MEM_CONTEXT_SHOW_WORK_TOKENS: 'false',
+    CLAUDE_MEM_CONTEXT_SHOW_SAVINGS_AMOUNT: 'false',
+    CLAUDE_MEM_CONTEXT_SHOW_SAVINGS_PERCENT: 'true',
+    CLAUDE_MEM_CONTEXT_OBSERVATION_TYPES: 'bugfix,feature,refactor,discovery,decision,change',
+    CLAUDE_MEM_CONTEXT_OBSERVATION_CONCEPTS: 'how-it-works,why-it-exists,what-changed,problem-solution,gotcha,pattern,trade-off',
+    CLAUDE_MEM_CONTEXT_FULL_COUNT: '0',
+    CLAUDE_MEM_CONTEXT_FULL_FIELD: 'narrative',
+    CLAUDE_MEM_CONTEXT_SESSION_COUNT: '10',
+    CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY: 'true',
+    CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE: 'false',
+    CLAUDE_MEM_CONTEXT_SHOW_TERMINAL_OUTPUT: 'true',
+    CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED: 'false',
+    CLAUDE_MEM_MAX_CONCURRENT_AGENTS: '2',
+    CLAUDE_MEM_EXCLUDED_PROJECTS: '',
+    CLAUDE_MEM_FOLDER_MD_EXCLUDE: '[]',
+    CLAUDE_MEM_CHROMA_ENABLED: 'true',
+    CLAUDE_MEM_CHROMA_MODE: 'local',
+    CLAUDE_MEM_CHROMA_HOST: '127.0.0.1',
+    CLAUDE_MEM_CHROMA_PORT: '8000',
+    CLAUDE_MEM_CHROMA_SSL: 'false',
+    CLAUDE_MEM_CHROMA_API_KEY: '',
+    CLAUDE_MEM_CHROMA_TENANT: 'default_tenant',
+    CLAUDE_MEM_CHROMA_DATABASE: 'default_database',
+    CLAUDE_MEM_STORAGE_PROVIDER: 'sqlite',
+    CLAUDE_MEM_PG_HOST: '127.0.0.1',
+    CLAUDE_MEM_PG_PORT: '5432',
+    CLAUDE_MEM_PG_DATABASE: 'claude_mem',
+    CLAUDE_MEM_PG_USER: '',
+    CLAUDE_MEM_PG_PASSWORD: '',
+    CLAUDE_MEM_PG_SSL: 'false',
+    CLAUDE_MEM_PG_CONNECTION_STRING: '',
+    CLAUDE_MEM_PG_POOL_MIN: '2',
+    CLAUDE_MEM_PG_POOL_MAX: '10',
+    CLAUDE_MEM_EMBEDDING_PROVIDER: 'local',
+    CLAUDE_MEM_EMBEDDING_API_KEY: '',
+    CLAUDE_MEM_EMBEDDING_MODEL: '',
+    CLAUDE_MEM_EMBEDDING_DIMENSIONS: '',
+  };
+
+  const applyEnvOverrides = (settings: Record<string, string>) => {
+    const result = { ...settings };
+    for (const key of Object.keys(DEFAULTS)) {
+      if (process.env[key] !== undefined) {
+        result[key] = process.env[key]!;
+      }
+    }
+    return result;
+  };
+
+  return {
+    SettingsDefaultsManager: {
+      get: (key: string) => process.env[key] ?? DEFAULTS[key] ?? '',
+      getInt: (key: string) => parseInt(process.env[key] ?? DEFAULTS[key] ?? '0', 10),
+      getBool: (key: string) => (process.env[key] ?? DEFAULTS[key] ?? '') === 'true',
+      getAllDefaults: () => ({ ...DEFAULTS }),
+      loadFromFile: (settingsPath: string) => {
+        try {
+          const { readFileSync, existsSync, mkdirSync, writeFileSync } = require('fs');
+          const { dirname } = require('path');
+          if (!existsSync(settingsPath)) {
+            const dir = dirname(settingsPath);
+            if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+            writeFileSync(settingsPath, JSON.stringify(DEFAULTS, null, 2), 'utf-8');
+            return applyEnvOverrides({ ...DEFAULTS });
+          }
+          const data = readFileSync(settingsPath, 'utf-8');
+          const parsed = JSON.parse(data);
+          let flat = parsed;
+          if (parsed.env && typeof parsed.env === 'object') {
+            flat = parsed.env;
+            // Auto-migrate file from nested to flat schema
+            try { writeFileSync(settingsPath, JSON.stringify(flat, null, 2), 'utf-8'); } catch {}
+          }
+          const result = { ...DEFAULTS };
+          for (const key of Object.keys(DEFAULTS)) {
+            if (flat[key] !== undefined) (result as any)[key] = flat[key];
+          }
+          return applyEnvOverrides(result);
+        } catch {
+          return applyEnvOverrides({ ...DEFAULTS });
+        }
+      },
     },
-    getInt: () => 0,
-    loadFromFile: () => ({ CLAUDE_MEM_EXCLUDED_PROJECTS: [] }),
-  },
-}));
+  };
+});
 
 mock.module('../../src/shared/worker-utils.js', () => ({
   ensureWorkerRunning: () => Promise.resolve(true),
@@ -33,9 +134,33 @@ mock.module('../../src/utils/project-name.js', () => ({
   getProjectName: () => 'test-project',
 }));
 
-mock.module('../../src/utils/project-filter.js', () => ({
-  isProjectExcluded: () => false,
-}));
+mock.module('../../src/utils/project-filter.js', () => {
+  // Must provide full implementation since mock.module is global in Bun
+  function globToRegex(pattern: string): RegExp {
+    let expanded = pattern.startsWith('~') ? homedir() + pattern.slice(1) : pattern;
+    expanded = expanded.replace(/\\/g, '/');
+    let regex = expanded.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    regex = regex
+      .replace(/\*\*/g, '<<<GLOBSTAR>>>')
+      .replace(/\*/g, '[^/]*')
+      .replace(/\?/g, '[^/]')
+      .replace(/<<<GLOBSTAR>>>/g, '.*');
+    return new RegExp(`^${regex}$`);
+  }
+  return {
+    isProjectExcluded: (projectPath: string, exclusionPatterns: string): boolean => {
+      if (!exclusionPatterns || !exclusionPatterns.trim()) return false;
+      const normalizedProjectPath = projectPath.replace(/\\/g, '/');
+      const patternList = exclusionPatterns.split(',').map(p => p.trim()).filter(Boolean);
+      for (const pattern of patternList) {
+        try {
+          if (globToRegex(pattern).test(normalizedProjectPath)) return true;
+        } catch { continue; }
+      }
+      return false;
+    },
+  };
+});
 
 // Now import after mocks
 import { logger } from '../../src/utils/logger.js';

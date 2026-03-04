@@ -406,27 +406,45 @@ export class WorkerService {
 
       await this.dbManager.initialize();
 
+      const storageProvider = this.dbManager.getRepository().providerName;
+
       // Reset any messages that were processing when worker died
-      const { PendingMessageStore } = await import('./sqlite/PendingMessageStore.js');
-      const pendingStore = new PendingMessageStore(this.dbManager.getSessionStore().db, 3);
-      const resetCount = pendingStore.resetStaleProcessingMessages(0); // 0 = reset ALL processing
-      if (resetCount > 0) {
-        logger.info('SYSTEM', `Reset ${resetCount} stale processing messages to pending`);
+      if (storageProvider === 'postgresql') {
+        // PostgreSQL: use repository interface for pending message reset
+        const resetCount = await this.dbManager.getRepository().pendingMessages.resetStaleProcessingMessages(0);
+        if (resetCount > 0) {
+          logger.info('SYSTEM', `Reset ${resetCount} stale processing messages to pending (PostgreSQL)`);
+        }
+      } else {
+        // SQLite: use legacy PendingMessageStore
+        const { PendingMessageStore } = await import('./sqlite/PendingMessageStore.js');
+        const pendingStore = new PendingMessageStore(this.dbManager.getSessionStore().db, 3);
+        const resetCount = pendingStore.resetStaleProcessingMessages(0); // 0 = reset ALL processing
+        if (resetCount > 0) {
+          logger.info('SYSTEM', `Reset ${resetCount} stale processing messages to pending`);
+        }
       }
 
       // Initialize search services
-      const formattingService = new FormattingService();
-      const timelineService = new TimelineService();
-      const searchManager = new SearchManager(
-        this.dbManager.getSessionSearch(),
-        this.dbManager.getSessionStore(),
-        this.dbManager.getChromaSync(),
-        formattingService,
-        timelineService
-      );
-      this.searchRoutes = new SearchRoutes(searchManager);
-      this.server.registerRoutes(this.searchRoutes);
-      logger.info('WORKER', 'SearchManager initialized and search routes registered');
+      if (storageProvider === 'postgresql') {
+        // PostgreSQL mode: SearchManager uses repository-based search
+        // Legacy SessionSearch/SessionStore not available - skip SearchManager for now
+        logger.info('WORKER', 'PostgreSQL mode: legacy SearchManager skipped (using repository search)');
+      } else {
+        // SQLite mode: use legacy SearchManager with SessionSearch/SessionStore
+        const formattingService = new FormattingService();
+        const timelineService = new TimelineService();
+        const searchManager = new SearchManager(
+          this.dbManager.getSessionSearch(),
+          this.dbManager.getSessionStore(),
+          this.dbManager.getChromaSync(),
+          formattingService,
+          timelineService
+        );
+        this.searchRoutes = new SearchRoutes(searchManager);
+        this.server.registerRoutes(this.searchRoutes);
+        logger.info('WORKER', 'SearchManager initialized and search routes registered');
+      }
 
       // DB and search are ready — mark initialization complete so hooks can proceed.
       // MCP connection is tracked separately via mcpReady and is NOT required for

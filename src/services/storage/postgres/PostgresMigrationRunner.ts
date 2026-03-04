@@ -336,8 +336,9 @@ export class PostgresMigrationRunner {
 
       // Create policy: allow full access when app.current_project is not set,
       // and project-scoped access when it is set.
-      // pending_messages doesn't have a project column directly, so use a different strategy
-      if (table === 'pending_messages') {
+      // pending_messages and user_prompts don't have a project column directly,
+      // so use a subquery via content_session_id → sdk_sessions JOIN
+      if (table === 'pending_messages' || table === 'user_prompts') {
         await this.sql.unsafe(`
           CREATE POLICY project_isolation ON ${table}
             FOR ALL
@@ -374,19 +375,26 @@ export class PostgresMigrationRunner {
    * Gracefully skips if pg_bigm extension is not available.
    */
   private async migrationV5_JapaneseFTS(): Promise<void> {
-    try {
-      await this.sql`CREATE EXTENSION IF NOT EXISTS pg_bigm`;
+    // Check if pg_bigm is available BEFORE attempting CREATE EXTENSION.
+    // CREATE EXTENSION failure inside a transaction aborts the entire transaction
+    // in PostgreSQL, making the subsequent schema_versions INSERT fail too.
+    const [extAvailable] = await this.sql`
+      SELECT 1 FROM pg_available_extensions WHERE name = 'pg_bigm'
+    `;
 
-      // Create bigram GIN indexes for Japanese text search
-      await this.sql`CREATE INDEX IF NOT EXISTS idx_observations_title_bigm ON observations USING gin (title gin_bigm_ops)`;
-      await this.sql`CREATE INDEX IF NOT EXISTS idx_observations_narrative_bigm ON observations USING gin (narrative gin_bigm_ops)`;
-      await this.sql`CREATE INDEX IF NOT EXISTS idx_summaries_request_bigm ON session_summaries USING gin (request gin_bigm_ops)`;
-      await this.sql`CREATE INDEX IF NOT EXISTS idx_prompts_text_bigm ON user_prompts USING gin (prompt_text gin_bigm_ops)`;
-
-      logger.info('DB', 'pg_bigm extension enabled for Japanese full-text search');
-    } catch (error) {
-      // pg_bigm not available - skip gracefully
+    if (!extAvailable) {
       logger.info('DB', 'pg_bigm extension not available, skipping Japanese FTS indexes (English tsvector still active)');
+      return;
     }
+
+    await this.sql`CREATE EXTENSION IF NOT EXISTS pg_bigm`;
+
+    // Create bigram GIN indexes for Japanese text search
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_observations_title_bigm ON observations USING gin (title gin_bigm_ops)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_observations_narrative_bigm ON observations USING gin (narrative gin_bigm_ops)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_summaries_request_bigm ON session_summaries USING gin (request gin_bigm_ops)`;
+    await this.sql`CREATE INDEX IF NOT EXISTS idx_prompts_text_bigm ON user_prompts USING gin (prompt_text gin_bigm_ops)`;
+
+    logger.info('DB', 'pg_bigm extension enabled for Japanese full-text search');
   }
 }

@@ -22,7 +22,7 @@ const WORKER_SCRIPT = path.join(__dirname, '../../plugin/scripts/worker-service.
  * Uses spawnSync for synchronous output capture
  */
 function runWorkerStart(): { stdout: string; exitCode: number } {
-  const result = spawnSync('bun', [WORKER_SCRIPT, 'start'], {
+  const result = spawnSync(process.execPath, [WORKER_SCRIPT, 'start'], {
     encoding: 'utf-8',
     timeout: 60000
   });
@@ -310,7 +310,7 @@ describe('worker-json-status', () => {
         return;
       }
 
-      const result = spawnSync('bun', [WORKER_SCRIPT, 'start'], {
+      const result = spawnSync(process.execPath, [WORKER_SCRIPT, 'start'], {
         encoding: 'utf-8',
         timeout: 60000
       });

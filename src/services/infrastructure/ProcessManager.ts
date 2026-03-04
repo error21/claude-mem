@@ -15,11 +15,12 @@ import { exec, execSync, spawn } from 'child_process';
 import { promisify } from 'util';
 import { logger } from '../../utils/logger.js';
 import { HOOK_TIMEOUTS } from '../../shared/hook-constants.js';
+import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 
 const execAsync = promisify(exec);
 
-// Standard paths for PID file management
-const DATA_DIR = path.join(homedir(), '.claude-mem');
+// Standard paths for PID file management - respects CLAUDE_MEM_DATA_DIR
+const DATA_DIR = SettingsDefaultsManager.get('CLAUDE_MEM_DATA_DIR');
 const PID_FILE = path.join(DATA_DIR, 'worker.pid');
 
 // Orphaned process cleanup patterns and thresholds

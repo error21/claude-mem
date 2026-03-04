@@ -38,6 +38,8 @@ const EXCLUDED_PATTERNS = [
   /cli\/hook-command\.ts$/,  // CLI hook command uses console.log/error for hook protocol output
   /cli\/handlers\/user-message\.ts$/,  // User message handler uses console.error for user-visible context
   /services\/transcripts\/cli\.ts$/,  // CLI transcript subcommands use console.log for user-visible interactive output
+  /services\/storage\/StorageProviderFactory\.ts$/,  // Uses console.error before process.exit(2) for fatal connection errors
+  /services\/storage\/migration\/DataMigrationTool\.ts$/,  // CLI migration tool with injectable log function default
 ];
 
 // Files that should always use logger (core business logic)
