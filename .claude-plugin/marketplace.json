@@ -1,11 +1,11 @@
 {
-  "name": "thedotmack",
+  "name": "error21",
   "owner": {
-    "name": "Alex Newman"
+    "name": "error21"
   },
   "metadata": {
-    "description": "Plugins by Alex Newman (thedotmack)",
-    "homepage": "https://github.com/thedotmack/claude-mem"
+    "description": "claude-mem fork by error21",
+    "homepage": "https://github.com/error21/claude-mem"
   },
   "plugins": [
     {

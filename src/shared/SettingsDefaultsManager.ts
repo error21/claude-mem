@@ -86,6 +86,8 @@ export interface SettingsDefaults {
   CLAUDE_MEM_EMBEDDING_API_KEY: string;   // API key for OpenAI or Voyage embedding provider
   CLAUDE_MEM_EMBEDDING_MODEL: string;     // Model name override (provider-specific)
   CLAUDE_MEM_EMBEDDING_DIMENSIONS: string; // Vector dimensions override
+  // Marketplace Configuration
+  CLAUDE_MEM_MARKETPLACE_VENDOR: string;  // Marketplace vendor directory name (default: 'thedotmack')
 }
 
 export class SettingsDefaultsManager {
@@ -166,6 +168,8 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_EMBEDDING_API_KEY: '',         // Required for openai/voyage providers
     CLAUDE_MEM_EMBEDDING_MODEL: '',           // Empty = use provider default
     CLAUDE_MEM_EMBEDDING_DIMENSIONS: '',      // Empty = use provider default
+    // Marketplace Configuration
+    CLAUDE_MEM_MARKETPLACE_VENDOR: 'thedotmack',  // Default marketplace vendor directory
   };
 
   /**
