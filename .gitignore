@@ -15,6 +15,7 @@ dist/
 .claude/skills/
 .claude/plans/
 .claude/worktrees/
+.claude/commands/kiro/
 plugin/data/
 plugin/data.backup/
 package-lock.json
@@ -39,3 +40,12 @@ https*/
 
 # Ignore WebStorm project files (for dinosaur IDE users)
 .idea/
+
+# Planning/session artifacts
+findings.md
+progress.md
+task_plan.md
+
+# Tool-specific directories
+.kiro/
+.serena/
