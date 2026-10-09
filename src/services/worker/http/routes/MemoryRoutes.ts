@@ -35,11 +35,29 @@ export class MemoryRoutes extends BaseRouteHandler {
       return;
     }
 
-    const sessionStore = this.dbManager.getSessionStore();
+    const repo = this.dbManager.getRepository();
     const chromaSync = this.dbManager.getChromaSync();
 
     // 1. Get or create manual session for project
-    const memorySessionId = sessionStore.getOrCreateManualSession(targetProject);
+    // Use a deterministic content_session_id for manual memories per project
+    const manualContentSessionId = `manual-memory-${targetProject}`;
+    let session = await repo.sessions.getSessionByContentId(manualContentSessionId);
+    let memorySessionId: string;
+
+    if (!session) {
+      // Create a new manual session
+      const sessionDbId = await repo.sessions.createSDKSession(
+        manualContentSessionId,
+        targetProject,
+        'Manual memories',
+        'Manual Memories'
+      );
+      // Use the content_session_id as the memory_session_id for manual sessions
+      memorySessionId = manualContentSessionId;
+      await repo.sessions.updateMemorySessionId(sessionDbId, memorySessionId);
+    } else {
+      memorySessionId = session.memory_session_id || manualContentSessionId;
+    }
 
     // 2. Build observation
     const observation = {
@@ -53,8 +71,8 @@ export class MemoryRoutes extends BaseRouteHandler {
       files_modified: [] as string[]
     };
 
-    // 3. Store to SQLite
-    const result = sessionStore.storeObservation(
+    // 3. Store observation via repository
+    const result = await repo.observations.storeObservation(
       memorySessionId,
       targetProject,
       observation,
@@ -68,18 +86,20 @@ export class MemoryRoutes extends BaseRouteHandler {
       title: observation.title
     });
 
-    // 4. Sync to ChromaDB (async, fire-and-forget)
-    chromaSync.syncObservation(
-      result.id,
-      memorySessionId,
-      targetProject,
-      observation,
-      0,
-      result.createdAtEpoch,
-      0
-    ).catch(err => {
-      logger.error('CHROMA', 'ChromaDB sync failed', { id: result.id }, err as Error);
-    });
+    // 4. Sync to ChromaDB (async, fire-and-forget) - only if available (SQLite mode)
+    if (chromaSync) {
+      chromaSync.syncObservation(
+        result.id,
+        memorySessionId,
+        targetProject,
+        observation,
+        0,
+        result.createdAtEpoch,
+        0
+      ).catch(err => {
+        logger.error('CHROMA', 'ChromaDB sync failed', { id: result.id }, err as Error);
+      });
+    }
 
     // 5. Return success
     res.json({

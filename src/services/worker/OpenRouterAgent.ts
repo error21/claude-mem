@@ -96,7 +96,8 @@ export class OpenRouterAgent {
       if (!session.memorySessionId) {
         const syntheticMemorySessionId = `openrouter-${session.contentSessionId}-${Date.now()}`;
         session.memorySessionId = syntheticMemorySessionId;
-        this.dbManager.getSessionStore().updateMemorySessionId(session.sessionDbId, syntheticMemorySessionId);
+        // Uses repository interface to support both SQLite and PostgreSQL backends
+        await this.dbManager.getRepository().sessions.updateMemorySessionId(session.sessionDbId, syntheticMemorySessionId);
         logger.info('SESSION', `MEMORY_ID_GENERATED | sessionDbId=${session.sessionDbId} | provider=OpenRouter`);
       }
 

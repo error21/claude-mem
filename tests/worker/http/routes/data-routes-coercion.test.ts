@@ -60,6 +60,14 @@ describe('DataRoutes Type Coercion', () => {
         getObservationsByIds: mockGetObservationsByIds,
         getSdkSessionsBySessionIds: mockGetSdkSessionsBySessionIds,
       }),
+      getRepository: () => ({
+        observations: {
+          getObservationsByIds: mockGetObservationsByIds,
+        },
+        sessions: {
+          getSessionsByMemoryIds: mockGetSdkSessionsBySessionIds,
+        },
+      }),
     };
 
     routes = new DataRoutes(
@@ -92,25 +100,28 @@ describe('DataRoutes Type Coercion', () => {
       routes.setupRoutes(mockApp as any);
     });
 
-    it('should accept a native array of numbers', () => {
+    it('should accept a native array of numbers', async () => {
       const { req, res, jsonSpy } = createMockReqRes({ ids: [1, 2, 3] });
       handler(req as Request, res as Response);
+      await new Promise(r => setTimeout(r, 0));
 
       expect(mockGetObservationsByIds).toHaveBeenCalledWith([1, 2, 3], expect.anything());
       expect(jsonSpy).toHaveBeenCalled();
     });
 
-    it('should coerce a JSON-encoded string array "[1,2,3]" to native array', () => {
+    it('should coerce a JSON-encoded string array "[1,2,3]" to native array', async () => {
       const { req, res, jsonSpy } = createMockReqRes({ ids: '[1,2,3]' });
       handler(req as Request, res as Response);
+      await new Promise(r => setTimeout(r, 0));
 
       expect(mockGetObservationsByIds).toHaveBeenCalledWith([1, 2, 3], expect.anything());
       expect(jsonSpy).toHaveBeenCalled();
     });
 
-    it('should coerce a comma-separated string "1,2,3" to native array', () => {
+    it('should coerce a comma-separated string "1,2,3" to native array', async () => {
       const { req, res, jsonSpy } = createMockReqRes({ ids: '1,2,3' });
       handler(req as Request, res as Response);
+      await new Promise(r => setTimeout(r, 0));
 
       expect(mockGetObservationsByIds).toHaveBeenCalledWith([1, 2, 3], expect.anything());
       expect(jsonSpy).toHaveBeenCalled();
@@ -153,33 +164,37 @@ describe('DataRoutes Type Coercion', () => {
       routes.setupRoutes(mockApp as any);
     });
 
-    it('should accept a native array of strings', () => {
+    it('should accept a native array of strings', async () => {
       const { req, res, jsonSpy } = createMockReqRes({ memorySessionIds: ['abc', 'def'] });
       handler(req as Request, res as Response);
+      await new Promise(r => setTimeout(r, 0));
 
       expect(mockGetSdkSessionsBySessionIds).toHaveBeenCalledWith(['abc', 'def']);
       expect(jsonSpy).toHaveBeenCalled();
     });
 
-    it('should coerce a JSON-encoded string array to native array', () => {
+    it('should coerce a JSON-encoded string array to native array', async () => {
       const { req, res, jsonSpy } = createMockReqRes({ memorySessionIds: '["abc","def"]' });
       handler(req as Request, res as Response);
+      await new Promise(r => setTimeout(r, 0));
 
       expect(mockGetSdkSessionsBySessionIds).toHaveBeenCalledWith(['abc', 'def']);
       expect(jsonSpy).toHaveBeenCalled();
     });
 
-    it('should coerce a comma-separated string to native array', () => {
+    it('should coerce a comma-separated string to native array', async () => {
       const { req, res, jsonSpy } = createMockReqRes({ memorySessionIds: 'abc,def' });
       handler(req as Request, res as Response);
+      await new Promise(r => setTimeout(r, 0));
 
       expect(mockGetSdkSessionsBySessionIds).toHaveBeenCalledWith(['abc', 'def']);
       expect(jsonSpy).toHaveBeenCalled();
     });
 
-    it('should trim whitespace from comma-separated values', () => {
+    it('should trim whitespace from comma-separated values', async () => {
       const { req, res, jsonSpy } = createMockReqRes({ memorySessionIds: 'abc, def , ghi' });
       handler(req as Request, res as Response);
+      await new Promise(r => setTimeout(r, 0));
 
       expect(mockGetSdkSessionsBySessionIds).toHaveBeenCalledWith(['abc', 'def', 'ghi']);
       expect(jsonSpy).toHaveBeenCalled();

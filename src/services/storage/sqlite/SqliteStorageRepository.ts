@@ -393,19 +393,18 @@ class SqlitePromptRepository implements IPromptRepository {
 
   async getLatestUserPrompt(
     contentSessionId: string
-  ): Promise<{
-    promptNumber: number;
-    promptText: string;
-    memorySessionId: string | null;
-    project: string;
-  } | null> {
+  ): Promise<PromptRow | null> {
     const result = getLatestUserPrompt(this.db, contentSessionId);
     if (!result) return null;
     return {
-      promptNumber: result.prompt_number,
-      promptText: result.prompt_text,
-      memorySessionId: result.memory_session_id,
+      id: result.id,
+      content_session_id: result.content_session_id,
+      prompt_number: result.prompt_number,
+      prompt_text: result.prompt_text,
+      memory_session_id: result.memory_session_id,
       project: result.project,
+      created_at: '',  // Not available from LatestPromptResult, but not needed by callers
+      created_at_epoch: result.created_at_epoch,
     };
   }
 

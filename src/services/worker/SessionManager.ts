@@ -15,6 +15,7 @@ import type { ActiveSession, PendingMessage, PendingMessageWithId, ObservationDa
 import { PendingMessageStore } from '../sqlite/PendingMessageStore.js';
 import { SessionQueueProcessor } from '../queue/SessionQueueProcessor.js';
 import { getProcessBySession, ensureProcessExit } from './ProcessRegistry.js';
+import type { IPendingMessageRepository } from '../storage/interfaces.js';
 
 export class SessionManager {
   private dbManager: DatabaseManager;
@@ -28,12 +29,31 @@ export class SessionManager {
   }
 
   /**
-   * Get or create PendingMessageStore (lazy initialization to avoid circular dependency)
+   * Get the pending messages repository interface (works for both SQLite and PostgreSQL).
+   */
+  private getPendingRepo(): IPendingMessageRepository {
+    return this.dbManager.getRepository().pendingMessages;
+  }
+
+  /**
+   * Get or create PendingMessageStore (lazy initialization).
+   * Only available in SQLite mode. For PostgreSQL, use getPendingRepo() instead.
+   * Kept for backward compatibility with SessionQueueProcessor which requires sync access.
    */
   private getPendingStore(): PendingMessageStore {
     if (!this.pendingStore) {
-      const sessionStore = this.dbManager.getSessionStore();
-      this.pendingStore = new PendingMessageStore(sessionStore.db, 3);
+      // Try to get the SQLite SessionStore for backward compat
+      try {
+        const sessionStore = this.dbManager.getSessionStore();
+        this.pendingStore = new PendingMessageStore(sessionStore.db, 3);
+      } catch {
+        // PostgreSQL mode: SessionStore not available.
+        // This code path should only be reached by SessionQueueProcessor
+        // which needs sync SQLite access. Throw a clear error.
+        throw new Error(
+          'PendingMessageStore requires SQLite. In PostgreSQL mode, use the repository interface (getPendingRepo()) instead.'
+        );
+      }
     }
     return this.pendingStore;
   }
@@ -46,9 +66,10 @@ export class SessionManager {
   }
 
   /**
-   * Initialize a new session or return existing one
+   * Initialize a new session or return existing one.
+   * Uses the repository interface for database access (supports both SQLite and PostgreSQL).
    */
-  initializeSession(sessionDbId: number, currentUserPrompt?: string, promptNumber?: number): ActiveSession {
+  async initializeSession(sessionDbId: number, currentUserPrompt?: string, promptNumber?: number): Promise<ActiveSession> {
     logger.debug('SESSION', 'initializeSession called', {
       sessionDbId,
       promptNumber,
@@ -67,7 +88,7 @@ export class SessionManager {
       // Refresh project from database in case it was updated by new-hook
       // This fixes the bug where sessions created with empty project get updated
       // in the database but the in-memory session still has the stale empty value
-      const dbSession = this.dbManager.getSessionById(sessionDbId);
+      const dbSession = await this.dbManager.getSessionById(sessionDbId);
       if (dbSession.project && dbSession.project !== session.project) {
         logger.debug('SESSION', 'Updating project from database', {
           sessionDbId,
@@ -97,8 +118,8 @@ export class SessionManager {
       return session;
     }
 
-    // Fetch from database
-    const dbSession = this.dbManager.getSessionById(sessionDbId);
+    // Fetch from database (uses repository interface - works for both SQLite and PostgreSQL)
+    const dbSession = await this.dbManager.getSessionById(sessionDbId);
 
     logger.debug('SESSION', 'Fetched session from database', {
       sessionDbId,
@@ -132,6 +153,10 @@ export class SessionManager {
       });
     }
 
+    // Get prompt count from repository (works for both SQLite and PostgreSQL)
+    const repo = this.dbManager.getRepository();
+    const lastPromptNumber = promptNumber || await repo.prompts.getPromptCount(dbSession.content_session_id);
+
     // Create active session
     // CRITICAL: Do NOT load memorySessionId from database here (Issue #817)
     // When creating a new in-memory session, any database memory_session_id is STALE
@@ -147,7 +172,7 @@ export class SessionManager {
       pendingMessages: [],
       abortController: new AbortController(),
       generatorPromise: null,
-      lastPromptNumber: promptNumber || this.dbManager.getSessionStore().getPromptNumberFromUserPrompts(dbSession.content_session_id),
+      lastPromptNumber,
       startTime: Date.now(),
       cumulativeInputTokens: 0,
       cumulativeOutputTokens: 0,
@@ -164,7 +189,7 @@ export class SessionManager {
       contentSessionId: dbSession.content_session_id,
       dbMemorySessionId: dbSession.memory_session_id || '(none in DB)',
       memorySessionId: '(cleared - will capture fresh from SDK)',
-      lastPromptNumber: promptNumber || this.dbManager.getSessionStore().getPromptNumberFromUserPrompts(dbSession.content_session_id)
+      lastPromptNumber
     });
 
     this.sessions.set(sessionDbId, session);
@@ -198,11 +223,11 @@ export class SessionManager {
    * CRITICAL: Persists to database FIRST before adding to in-memory queue.
    * This ensures observations survive worker crashes.
    */
-  queueObservation(sessionDbId: number, data: ObservationData): void {
+  async queueObservation(sessionDbId: number, data: ObservationData): Promise<void> {
     // Auto-initialize from database if needed (handles worker restarts)
     let session = this.sessions.get(sessionDbId);
     if (!session) {
-      session = this.initializeSession(sessionDbId);
+      session = await this.initializeSession(sessionDbId);
     }
 
     // CRITICAL: Persist to database FIRST
@@ -216,8 +241,9 @@ export class SessionManager {
     };
 
     try {
-      const messageId = this.getPendingStore().enqueue(sessionDbId, session.contentSessionId, message);
-      const queueDepth = this.getPendingStore().getPendingCount(sessionDbId);
+      const pendingRepo = this.getPendingRepo();
+      const messageId = await pendingRepo.enqueue(sessionDbId, session.contentSessionId, message);
+      const queueDepth = await pendingRepo.getPendingCount(sessionDbId);
       const toolSummary = logger.formatTool(data.tool_name, data.tool_input);
       logger.info('QUEUE', `ENQUEUED | sessionDbId=${sessionDbId} | messageId=${messageId} | type=observation | tool=${toolSummary} | depth=${queueDepth}`, {
         sessionId: sessionDbId
@@ -242,11 +268,11 @@ export class SessionManager {
    * CRITICAL: Persists to database FIRST before adding to in-memory queue.
    * This ensures summarize requests survive worker crashes.
    */
-  queueSummarize(sessionDbId: number, lastAssistantMessage?: string): void {
+  async queueSummarize(sessionDbId: number, lastAssistantMessage?: string): Promise<void> {
     // Auto-initialize from database if needed (handles worker restarts)
     let session = this.sessions.get(sessionDbId);
     if (!session) {
-      session = this.initializeSession(sessionDbId);
+      session = await this.initializeSession(sessionDbId);
     }
 
     // CRITICAL: Persist to database FIRST
@@ -256,8 +282,9 @@ export class SessionManager {
     };
 
     try {
-      const messageId = this.getPendingStore().enqueue(sessionDbId, session.contentSessionId, message);
-      const queueDepth = this.getPendingStore().getPendingCount(sessionDbId);
+      const pendingRepo = this.getPendingRepo();
+      const messageId = await pendingRepo.enqueue(sessionDbId, session.contentSessionId, message);
+      const queueDepth = await pendingRepo.getPendingCount(sessionDbId);
       logger.info('QUEUE', `ENQUEUED | sessionDbId=${sessionDbId} | messageId=${messageId} | type=summarize | depth=${queueDepth}`, {
         sessionId: sessionDbId
       });
@@ -357,13 +384,14 @@ export class SessionManager {
   async reapStaleSessions(): Promise<number> {
     const now = Date.now();
     const staleSessionIds: number[] = [];
+    const pendingRepo = this.getPendingRepo();
 
     for (const [sessionDbId, session] of this.sessions) {
       // Skip sessions with active generators
       if (session.generatorPromise) continue;
 
       // Skip sessions with pending work
-      const pendingCount = this.getPendingStore().getPendingCount(sessionDbId);
+      const pendingCount = await pendingRepo.getPendingCount(sessionDbId);
       if (pendingCount > 0) continue;
 
       // No generator + no pending work + old enough = stale
@@ -392,8 +420,8 @@ export class SessionManager {
   /**
    * Check if any session has pending messages (for spinner tracking)
    */
-  hasPendingMessages(): boolean {
-    return this.getPendingStore().hasAnyPendingWork();
+  async hasPendingMessages(): Promise<boolean> {
+    return this.getPendingRepo().hasAnyPendingWork();
   }
 
   /**
@@ -406,11 +434,12 @@ export class SessionManager {
   /**
    * Get total queue depth across all sessions (for activity indicator)
    */
-  getTotalQueueDepth(): number {
+  async getTotalQueueDepth(): Promise<number> {
     let total = 0;
+    const pendingRepo = this.getPendingRepo();
     // We can iterate over active sessions to get their pending count
     for (const session of this.sessions.values()) {
-      total += this.getPendingStore().getPendingCount(session.sessionDbId);
+      total += await pendingRepo.getPendingCount(session.sessionDbId);
     }
     return total;
   }
@@ -419,7 +448,7 @@ export class SessionManager {
    * Get total active work (queued + currently processing)
    * Counts both pending messages and items actively being processed by SDK agents
    */
-  getTotalActiveWork(): number {
+  async getTotalActiveWork(): Promise<number> {
     // getPendingCount includes 'processing' status, so this IS the total active work
     return this.getTotalQueueDepth();
   }
@@ -428,9 +457,9 @@ export class SessionManager {
    * Check if any session is actively processing (has pending messages OR active generator)
    * Used for activity indicator to prevent spinner from stopping while SDK is processing
    */
-  isAnySessionProcessing(): boolean {
+  async isAnySessionProcessing(): Promise<boolean> {
     // hasAnyPendingWork checks for 'pending' OR 'processing'
-    return this.getPendingStore().hasAnyPendingWork();
+    return this.getPendingRepo().hasAnyPendingWork();
   }
 
   /**
@@ -445,7 +474,7 @@ export class SessionManager {
     // Auto-initialize from database if needed (handles worker restarts)
     let session = this.sessions.get(sessionDbId);
     if (!session) {
-      session = this.initializeSession(sessionDbId);
+      session = await this.initializeSession(sessionDbId);
     }
 
     const emitter = this.sessionQueues.get(sessionDbId);
@@ -484,6 +513,7 @@ export class SessionManager {
 
   /**
    * Get the PendingMessageStore (for SDKAgent to mark messages as processed)
+   * @deprecated Use repository.pendingMessages for new code. Only available in SQLite mode.
    */
   getPendingMessageStore(): PendingMessageStore {
     return this.getPendingStore();

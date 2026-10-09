@@ -8,9 +8,12 @@
 import path from 'path';
 import { homedir } from 'os';
 import { unlinkSync } from 'fs';
-import { SessionStore } from '../sqlite/SessionStore.js';
 import { logger } from '../../utils/logger.js';
 import { getProjectName } from '../../utils/project-name.js';
+import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
+import { USER_SETTINGS_PATH } from '../../shared/paths.js';
+import { StorageProviderFactory } from '../storage/StorageProviderFactory.js';
+import type { IStorageRepository } from '../storage/interfaces.js';
 
 import type { ContextInput, ContextConfig, Observation, SessionSummary } from './types.js';
 import { loadContextConfig } from './ContextConfigLoader.js';
@@ -44,11 +47,13 @@ const VERSION_MARKER_PATH = path.join(
 );
 
 /**
- * Initialize database connection with error handling
+ * Initialize storage repository with error handling.
+ * Uses StorageProviderFactory for backend-agnostic access (SQLite or PostgreSQL).
  */
-function initializeDatabase(): SessionStore | null {
+async function initializeRepository(): Promise<IStorageRepository | null> {
   try {
-    return new SessionStore();
+    const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+    return await StorageProviderFactory.create(settings);
   } catch (error: any) {
     if (error.code === 'ERR_DLOPEN_FAILED') {
       try {
@@ -134,20 +139,20 @@ export async function generateContext(
   // Use provided projects array (for worktree support) or fall back to single project
   const projects = input?.projects || [project];
 
-  // Initialize database
-  const db = initializeDatabase();
-  if (!db) {
+  // Initialize storage repository (supports both SQLite and PostgreSQL)
+  const repo = await initializeRepository();
+  if (!repo) {
     return '';
   }
 
   try {
     // Query data for all projects (supports worktree: parent + worktree combined)
     const observations = projects.length > 1
-      ? queryObservationsMulti(db, projects, config)
-      : queryObservations(db, project, config);
+      ? await queryObservationsMulti(repo, projects, config)
+      : await queryObservations(repo, project, config);
     const summaries = projects.length > 1
-      ? querySummariesMulti(db, projects, config)
-      : querySummaries(db, project, config);
+      ? await querySummariesMulti(repo, projects, config)
+      : await querySummaries(repo, project, config);
 
     // Handle empty state
     if (observations.length === 0 && summaries.length === 0) {
@@ -165,6 +170,6 @@ export async function generateContext(
       useColors
     );
   } finally {
-    db.close();
+    await repo.close();
   }
 }

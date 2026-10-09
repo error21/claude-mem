@@ -5,6 +5,7 @@
  * - DRY helper for paginated queries
  * - Eliminates copy-paste across observations/summaries/prompts endpoints
  * - Efficient LIMIT+1 trick to avoid COUNT(*) query
+ * - Supports both SQLite and PostgreSQL via IStorageRepository
  */
 
 import { DatabaseManager } from './DatabaseManager.js';
@@ -71,26 +72,135 @@ export class PaginationHelper {
   /**
    * Get paginated observations
    */
-  getObservations(offset: number, limit: number, project?: string): PaginatedResult<Observation> {
-    const result = this.paginate<Observation>(
-      'observations',
-      'id, memory_session_id, project, type, title, subtitle, narrative, text, facts, concepts, files_read, files_modified, prompt_number, created_at, created_at_epoch',
-      offset,
-      limit,
-      project
-    );
+  async getObservations(offset: number, limit: number, project?: string): Promise<PaginatedResult<Observation>> {
+    const repo = this.dbManager.getRepository();
 
-    // Strip project paths from file paths before returning
+    // Fetch limit+1 to check hasMore
+    const fetchLimit = limit + 1;
+    let results: any[];
+
+    if (project) {
+      results = await repo.observations.getRecentObservations(project, fetchLimit);
+    } else {
+      results = await repo.observations.getAllRecentObservations(fetchLimit);
+    }
+
+    // Apply offset manually (repository methods don't support offset natively)
+    // For large offsets this is suboptimal but works for both providers
+    if (offset > 0) {
+      // For SQLite, fall back to raw SQL pagination if available
+      if (repo.providerName === 'sqlite') {
+        try {
+          const sqlResult = this.paginateSqlite<Observation>(
+            'observations',
+            'id, memory_session_id, project, type, title, subtitle, narrative, text, facts, concepts, files_read, files_modified, prompt_number, created_at, created_at_epoch',
+            offset,
+            limit,
+            project
+          );
+          return {
+            ...sqlResult,
+            items: sqlResult.items.map(obs => this.sanitizeObservation(obs))
+          };
+        } catch {
+          // Fallback to repository approach
+        }
+      }
+
+      // For PostgreSQL or fallback: fetch enough to cover offset+limit
+      const allResults = project
+        ? await repo.observations.getRecentObservations(project, offset + fetchLimit)
+        : await repo.observations.getAllRecentObservations(offset + fetchLimit);
+      results = allResults.slice(offset, offset + fetchLimit);
+    }
+
+    const items = results.slice(0, limit) as Observation[];
     return {
-      ...result,
-      items: result.items.map(obs => this.sanitizeObservation(obs))
+      items: items.map(obs => this.sanitizeObservation(obs)),
+      hasMore: results.length > limit,
+      offset,
+      limit
     };
   }
 
   /**
    * Get paginated summaries
    */
-  getSummaries(offset: number, limit: number, project?: string): PaginatedResult<Summary> {
+  async getSummaries(offset: number, limit: number, project?: string): Promise<PaginatedResult<Summary>> {
+    const repo = this.dbManager.getRepository();
+
+    // For SQLite, use raw SQL for proper JOIN and pagination
+    if (repo.providerName === 'sqlite') {
+      try {
+        return this.getSummariesSqlite(offset, limit, project);
+      } catch {
+        // Fallback to repository approach
+      }
+    }
+
+    // For PostgreSQL: use repository methods
+    const fetchLimit = limit + 1;
+    let results: any[];
+
+    if (project) {
+      results = await repo.summaries.getRecentSummaries(project, offset + fetchLimit);
+    } else {
+      results = await repo.summaries.getAllRecentSummaries(offset + fetchLimit);
+    }
+
+    // Apply offset
+    const sliced = results.slice(offset, offset + fetchLimit);
+
+    return {
+      items: sliced.slice(0, limit) as Summary[],
+      hasMore: sliced.length > limit,
+      offset,
+      limit
+    };
+  }
+
+  /**
+   * Get paginated user prompts
+   */
+  async getPrompts(offset: number, limit: number, project?: string): Promise<PaginatedResult<UserPrompt>> {
+    const repo = this.dbManager.getRepository();
+
+    // For SQLite, use raw SQL for proper JOIN and pagination
+    if (repo.providerName === 'sqlite') {
+      try {
+        return this.getPromptsSqlite(offset, limit, project);
+      } catch {
+        // Fallback to repository approach
+      }
+    }
+
+    // For PostgreSQL: use repository methods
+    const fetchLimit = limit + 1;
+    const results = await repo.prompts.getAllRecentUserPrompts(offset + fetchLimit);
+
+    // Apply offset and project filter
+    let filtered = results;
+    if (project) {
+      filtered = results.filter(p => p.project === project);
+    }
+    const sliced = filtered.slice(offset, offset + fetchLimit);
+
+    return {
+      items: sliced.slice(0, limit) as unknown as UserPrompt[],
+      hasMore: sliced.length > limit,
+      offset,
+      limit
+    };
+  }
+
+  // ============================================================
+  // SQLite-specific methods (use raw db.prepare for efficient pagination)
+  // ============================================================
+
+  /**
+   * SQLite-specific paginated summaries with JOIN
+   */
+  private getSummariesSqlite(offset: number, limit: number, project?: string): PaginatedResult<Summary> {
     const db = this.dbManager.getSessionStore().db;
 
     let query = `
@@ -130,9 +240,9 @@ export class PaginationHelper {
   }
 
   /**
-   * Get paginated user prompts
+   * SQLite-specific paginated user prompts with JOIN
    */
-  getPrompts(offset: number, limit: number, project?: string): PaginatedResult<UserPrompt> {
+  private getPromptsSqlite(offset: number, limit: number, project?: string): PaginatedResult<UserPrompt> {
     const db = this.dbManager.getSessionStore().db;
 
     let query = `
@@ -162,9 +272,9 @@ export class PaginationHelper {
   }
 
   /**
-   * Generic pagination implementation (DRY)
+   * SQLite-specific generic pagination implementation (DRY)
    */
-  private paginate<T>(
+  private paginateSqlite<T>(
     table: string,
     columns: string,
     offset: number,

@@ -2,13 +2,15 @@
  * ObservationCompiler - Query building and data retrieval for context
  *
  * Handles database queries for observations and summaries, plus transcript extraction.
+ * Uses IStorageRepository for backend-agnostic queries (supports both SQLite and PostgreSQL).
  */
 
 import path from 'path';
 import { existsSync, readFileSync } from 'fs';
-import { SessionStore } from '../sqlite/SessionStore.js';
 import { logger } from '../../utils/logger.js';
 import { CLAUDE_CONFIG_DIR } from '../../shared/paths.js';
+import type { IStorageRepository } from '../storage/interfaces.js';
+import type { ObservationRow, SummaryRow } from '../storage/types.js';
 import type {
   ContextConfig,
   Observation,
@@ -20,109 +22,148 @@ import type {
 import { SUMMARY_LOOKAHEAD } from './types.js';
 
 /**
- * Query observations from database with type and concept filtering
+ * Fetch multiplier: we request more rows than needed from the repository
+ * to account for in-memory type/concept filtering reducing the result set.
  */
-export function queryObservations(
-  db: SessionStore,
-  project: string,
-  config: ContextConfig
-): Observation[] {
-  const typeArray = Array.from(config.observationTypes);
-  const typePlaceholders = typeArray.map(() => '?').join(',');
-  const conceptArray = Array.from(config.observationConcepts);
-  const conceptPlaceholders = conceptArray.map(() => '?').join(',');
+const FETCH_MULTIPLIER = 5;
 
-  return db.db.prepare(`
-    SELECT
-      id, memory_session_id, type, title, subtitle, narrative,
-      facts, concepts, files_read, files_modified, discovery_tokens,
-      created_at, created_at_epoch
-    FROM observations
-    WHERE project = ?
-      AND type IN (${typePlaceholders})
-      AND EXISTS (
-        SELECT 1 FROM json_each(concepts)
-        WHERE value IN (${conceptPlaceholders})
-      )
-    ORDER BY created_at_epoch DESC
-    LIMIT ?
-  `).all(project, ...typeArray, ...conceptArray, config.totalObservationCount) as Observation[];
+/**
+ * Check if an observation's concepts array intersects with the required concepts.
+ * Concepts are stored as a JSON array string (e.g. '["architecture","testing"]').
+ */
+function hasMatchingConcept(conceptsJson: string | null, requiredConcepts: Set<string>): boolean {
+  if (!conceptsJson) return false;
+  try {
+    const concepts: string[] = JSON.parse(conceptsJson);
+    return concepts.some(c => requiredConcepts.has(c));
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Query recent session summaries from database
+ * Map an ObservationRow to the Observation type used by context rendering.
  */
-export function querySummaries(
-  db: SessionStore,
-  project: string,
-  config: ContextConfig
-): SessionSummary[] {
-  return db.db.prepare(`
-    SELECT id, memory_session_id, request, investigated, learned, completed, next_steps, created_at, created_at_epoch
-    FROM session_summaries
-    WHERE project = ?
-    ORDER BY created_at_epoch DESC
-    LIMIT ?
-  `).all(project, config.sessionCount + SUMMARY_LOOKAHEAD) as SessionSummary[];
+function toObservation(row: ObservationRow): Observation {
+  return {
+    id: row.id,
+    memory_session_id: row.memory_session_id,
+    type: row.type,
+    title: row.title,
+    subtitle: row.subtitle,
+    narrative: row.narrative,
+    facts: row.facts,
+    concepts: row.concepts,
+    files_read: row.files_read,
+    files_modified: row.files_modified,
+    discovery_tokens: row.discovery_tokens,
+    created_at: row.created_at,
+    created_at_epoch: row.created_at_epoch,
+    project: row.project,
+  };
 }
 
 /**
- * Query observations from multiple projects (for worktree support)
+ * Map a SummaryRow to the SessionSummary type used by context rendering.
+ */
+function toSessionSummary(row: SummaryRow): SessionSummary {
+  return {
+    id: row.id,
+    memory_session_id: row.memory_session_id,
+    request: row.request,
+    investigated: row.investigated,
+    learned: row.learned,
+    completed: row.completed,
+    next_steps: row.next_steps,
+    created_at: row.created_at,
+    created_at_epoch: row.created_at_epoch,
+    project: row.project,
+  };
+}
+
+/**
+ * Query observations from database with type and concept filtering.
+ * Uses IStorageRepository for backend-agnostic access (SQLite and PostgreSQL).
+ */
+export async function queryObservations(
+  repo: IStorageRepository,
+  project: string,
+  config: ContextConfig
+): Promise<Observation[]> {
+  const typeSet = config.observationTypes;
+  const conceptSet = config.observationConcepts;
+  const fetchLimit = config.totalObservationCount * FETCH_MULTIPLIER;
+
+  const rows = await repo.observations.getRecentObservations(project, fetchLimit);
+
+  return rows
+    .filter(row => typeSet.has(row.type) && hasMatchingConcept(row.concepts, conceptSet))
+    .slice(0, config.totalObservationCount)
+    .map(toObservation);
+}
+
+/**
+ * Query recent session summaries from database.
+ * Uses IStorageRepository for backend-agnostic access (SQLite and PostgreSQL).
+ */
+export async function querySummaries(
+  repo: IStorageRepository,
+  project: string,
+  config: ContextConfig
+): Promise<SessionSummary[]> {
+  const limit = config.sessionCount + SUMMARY_LOOKAHEAD;
+  const rows = await repo.summaries.getRecentSummaries(project, limit);
+  return rows.map(toSessionSummary);
+}
+
+/**
+ * Query observations from multiple projects (for worktree support).
  *
- * Returns observations from all specified projects, interleaved chronologically.
- * Used when running in a worktree to show both parent repo and worktree observations.
+ * Returns observations from all specified projects, filtered by type and concept,
+ * interleaved chronologically. Uses IStorageRepository for backend-agnostic access.
  */
-export function queryObservationsMulti(
-  db: SessionStore,
+export async function queryObservationsMulti(
+  repo: IStorageRepository,
   projects: string[],
   config: ContextConfig
-): Observation[] {
-  const typeArray = Array.from(config.observationTypes);
-  const typePlaceholders = typeArray.map(() => '?').join(',');
-  const conceptArray = Array.from(config.observationConcepts);
-  const conceptPlaceholders = conceptArray.map(() => '?').join(',');
+): Promise<Observation[]> {
+  const typeSet = config.observationTypes;
+  const conceptSet = config.observationConcepts;
+  const projectSet = new Set(projects);
+  const fetchLimit = config.totalObservationCount * FETCH_MULTIPLIER;
 
-  // Build IN clause for projects
-  const projectPlaceholders = projects.map(() => '?').join(',');
+  const rows = await repo.observations.getAllRecentObservations(fetchLimit);
 
-  return db.db.prepare(`
-    SELECT
-      id, memory_session_id, type, title, subtitle, narrative,
-      facts, concepts, files_read, files_modified, discovery_tokens,
-      created_at, created_at_epoch, project
-    FROM observations
-    WHERE project IN (${projectPlaceholders})
-      AND type IN (${typePlaceholders})
-      AND EXISTS (
-        SELECT 1 FROM json_each(concepts)
-        WHERE value IN (${conceptPlaceholders})
-      )
-    ORDER BY created_at_epoch DESC
-    LIMIT ?
-  `).all(...projects, ...typeArray, ...conceptArray, config.totalObservationCount) as Observation[];
+  return rows
+    .filter(row =>
+      projectSet.has(row.project) &&
+      typeSet.has(row.type) &&
+      hasMatchingConcept(row.concepts, conceptSet)
+    )
+    .slice(0, config.totalObservationCount)
+    .map(toObservation);
 }
 
 /**
- * Query session summaries from multiple projects (for worktree support)
+ * Query session summaries from multiple projects (for worktree support).
  *
  * Returns summaries from all specified projects, interleaved chronologically.
- * Used when running in a worktree to show both parent repo and worktree summaries.
+ * Uses IStorageRepository for backend-agnostic access.
  */
-export function querySummariesMulti(
-  db: SessionStore,
+export async function querySummariesMulti(
+  repo: IStorageRepository,
   projects: string[],
   config: ContextConfig
-): SessionSummary[] {
-  // Build IN clause for projects
-  const projectPlaceholders = projects.map(() => '?').join(',');
+): Promise<SessionSummary[]> {
+  const projectSet = new Set(projects);
+  const fetchLimit = (config.sessionCount + SUMMARY_LOOKAHEAD) * FETCH_MULTIPLIER;
 
-  return db.db.prepare(`
-    SELECT id, memory_session_id, request, investigated, learned, completed, next_steps, created_at, created_at_epoch, project
-    FROM session_summaries
-    WHERE project IN (${projectPlaceholders})
-    ORDER BY created_at_epoch DESC
-    LIMIT ?
-  `).all(...projects, config.sessionCount + SUMMARY_LOOKAHEAD) as SessionSummary[];
+  const rows = await repo.summaries.getAllRecentSummaries(fetchLimit);
+
+  return rows
+    .filter(row => projectSet.has(row.project))
+    .slice(0, config.sessionCount + SUMMARY_LOOKAHEAD)
+    .map(toSessionSummary);
 }
 
 /**

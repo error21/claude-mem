@@ -369,7 +369,7 @@ describe('Context Re-Injection Guard (#1079)', () => {
       const { SessionManager } = await import('../../src/services/worker/SessionManager.js');
 
       const mockDbManager = {
-        getSessionById: () => ({
+        getSessionById: () => Promise.resolve({
           id: 42,
           content_session_id: 'test-session',
           project: 'test',
@@ -378,6 +378,16 @@ describe('Context Re-Injection Guard (#1079)', () => {
           status: 'active',
           started_at: new Date().toISOString(),
           completed_at: null,
+        }),
+        getRepository: () => ({
+          prompts: {
+            getPromptCount: () => Promise.resolve(0),
+          },
+          pendingMessages: {
+            enqueue: () => Promise.resolve(1),
+            getPendingCount: () => Promise.resolve(0),
+            hasAnyPendingWork: () => Promise.resolve(false),
+          },
         }),
         getSessionStore: () => ({
           db: {},
@@ -388,7 +398,7 @@ describe('Context Re-Injection Guard (#1079)', () => {
       const sessionManager = new SessionManager(mockDbManager);
 
       // Initialize session (simulates first SDK agent init)
-      sessionManager.initializeSession(42, 'first prompt', 1);
+      await sessionManager.initializeSession(42, 'first prompt', 1);
 
       // Now getSession should return the active session
       const session = sessionManager.getSession(42);
@@ -400,7 +410,7 @@ describe('Context Re-Injection Guard (#1079)', () => {
       const { SessionManager } = await import('../../src/services/worker/SessionManager.js');
 
       const mockDbManager = {
-        getSessionById: () => ({
+        getSessionById: () => Promise.resolve({
           id: 42,
           content_session_id: 'test-session',
           project: 'test',
@@ -409,6 +419,16 @@ describe('Context Re-Injection Guard (#1079)', () => {
           status: 'active',
           started_at: new Date().toISOString(),
           completed_at: null,
+        }),
+        getRepository: () => ({
+          prompts: {
+            getPromptCount: () => Promise.resolve(0),
+          },
+          pendingMessages: {
+            enqueue: () => Promise.resolve(1),
+            getPendingCount: () => Promise.resolve(0),
+            hasAnyPendingWork: () => Promise.resolve(false),
+          },
         }),
         getSessionStore: () => ({
           db: {},
@@ -422,11 +442,11 @@ describe('Context Re-Injection Guard (#1079)', () => {
       expect(sessionManager.getSession(42)).toBeUndefined();
 
       // After initialization: contextInjected would be true
-      sessionManager.initializeSession(42, 'first prompt', 1);
+      await sessionManager.initializeSession(42, 'first prompt', 1);
       expect(sessionManager.getSession(42)).toBeDefined();
 
       // Second call to initializeSession returns existing session (idempotent)
-      const session2 = sessionManager.initializeSession(42, 'second prompt', 2);
+      const session2 = await sessionManager.initializeSession(42, 'second prompt', 2);
       expect(session2.contentSessionId).toBe('test-session');
       expect(session2.userPrompt).toBe('second prompt');
       expect(session2.lastPromptNumber).toBe(2);

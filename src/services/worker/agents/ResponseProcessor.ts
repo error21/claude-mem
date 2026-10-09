@@ -71,8 +71,8 @@ export async function processAgentResponse(
   // Convert nullable fields to empty strings for storeSummary (if summary exists)
   const summaryForStore = normalizeSummaryForStorage(summary);
 
-  // Get session store for atomic transaction
-  const sessionStore = dbManager.getSessionStore();
+  // Get repository for storage operations (works for both SQLite and PostgreSQL)
+  const repo = dbManager.getRepository();
 
   // CRITICAL: Must use memorySessionId (not contentSessionId) for FK constraint
   if (!session.memorySessionId) {
@@ -85,7 +85,7 @@ export async function processAgentResponse(
   // in case the DB was somehow not updated (race condition, crash, etc.).
   // In multi-terminal scenarios, createSDKSession() now resets memory_session_id to NULL
   // for each new generator, ensuring clean isolation.
-  sessionStore.ensureMemorySessionIdRegistered(session.sessionDbId, session.memorySessionId);
+  await repo.sessions.updateMemorySessionId(session.sessionDbId, session.memorySessionId);
 
   // Log pre-storage with session ID chain for verification
   logger.info('DB', `STORING | sessionDbId=${session.sessionDbId} | memorySessionId=${session.memorySessionId} | obsCount=${observations.length} | hasSummary=${!!summaryForStore}`, {
@@ -95,15 +95,44 @@ export async function processAgentResponse(
 
   // ATOMIC TRANSACTION: Store observations + summary ONCE
   // Messages are already deleted from queue on claim, so no completion tracking needed
-  const result = sessionStore.storeObservations(
-    session.memorySessionId,
-    session.project,
-    observations,
-    summaryForStore,
-    session.lastPromptNumber,
-    discoveryTokens,
-    originalTimestamp ?? undefined
-  );
+  // Uses repository.withTransaction for atomicity across both SQLite and PostgreSQL
+  const result = await repo.withTransaction(async (txRepo) => {
+    const observationIds: number[] = [];
+    const timestampEpoch = originalTimestamp ?? Date.now();
+
+    // Store all observations (repository handles content-hash deduplication)
+    for (const obs of observations) {
+      const storeResult = await txRepo.observations.storeObservation(
+        session.memorySessionId!,
+        session.project,
+        obs,
+        session.lastPromptNumber,
+        discoveryTokens,
+        originalTimestamp ?? undefined
+      );
+      observationIds.push(storeResult.id);
+    }
+
+    // Store summary if present
+    let summaryId: number | null = null;
+    if (summaryForStore) {
+      const summaryResult = await txRepo.summaries.storeSummary(
+        session.memorySessionId!,
+        session.project,
+        summaryForStore,
+        session.lastPromptNumber,
+        discoveryTokens,
+        originalTimestamp ?? undefined
+      );
+      summaryId = summaryResult.id;
+    }
+
+    return {
+      observationIds,
+      summaryId,
+      createdAtEpoch: timestampEpoch,
+    } as StorageResult;
+  });
 
   // Log storage result with IDs for end-to-end traceability
   logger.info('DB', `STORED | sessionDbId=${session.sessionDbId} | memorySessionId=${session.memorySessionId} | obsCount=${result.observationIds.length} | obsIds=[${result.observationIds.join(',')}] | summaryId=${result.summaryId || 'none'}`, {
@@ -113,9 +142,8 @@ export async function processAgentResponse(
 
   // CLAIM-CONFIRM: Now that storage succeeded, confirm all processing messages (delete from queue)
   // This is the critical step that prevents message loss on generator crash
-  const pendingStore = sessionManager.getPendingMessageStore();
   for (const messageId of session.processingMessageIds) {
-    pendingStore.confirmProcessed(messageId);
+    await repo.pendingMessages.confirmProcessed(messageId);
   }
   if (session.processingMessageIds.length > 0) {
     logger.debug('QUEUE', `CONFIRMED_BATCH | sessionDbId=${session.sessionDbId} | count=${session.processingMessageIds.length} | ids=[${session.processingMessageIds.join(',')}]`);

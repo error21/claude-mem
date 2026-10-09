@@ -1,4 +1,4 @@
-import { SessionStore } from '../../sqlite/SessionStore.js';
+import type { IPromptRepository } from '../../storage/interfaces.js';
 import { logger } from '../../../utils/logger.js';
 
 /**
@@ -11,21 +11,21 @@ export class PrivacyCheckValidator {
   /**
    * Check if user prompt is public (not entirely private)
    *
-   * @param store - SessionStore instance
+   * @param prompts - IPromptRepository instance (supports both SQLite and PostgreSQL)
    * @param contentSessionId - Claude session ID
    * @param promptNumber - Prompt number within session
    * @param operationType - Type of operation being validated ('observation' or 'summarize')
    * @returns User prompt text if public, null if private
    */
-  static checkUserPromptPrivacy(
-    store: SessionStore,
+  static async checkUserPromptPrivacy(
+    prompts: IPromptRepository,
     contentSessionId: string,
     promptNumber: number,
     operationType: 'observation' | 'summarize',
     sessionDbId: number,
     additionalContext?: Record<string, any>
-  ): string | null {
-    const userPrompt = store.getUserPrompt(contentSessionId, promptNumber);
+  ): Promise<string | null> {
+    const userPrompt = await prompts.getUserPrompt(contentSessionId, promptNumber);
 
     if (!userPrompt || userPrompt.trim() === '') {
       logger.debug('HOOK', `Skipping ${operationType} - user prompt was entirely private`, {

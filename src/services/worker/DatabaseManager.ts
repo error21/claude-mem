@@ -132,19 +132,27 @@ export class DatabaseManager {
 
   /**
    * Get session by ID (throws if not found)
+   * Uses repository interface to support both SQLite and PostgreSQL.
    */
-  getSessionById(sessionDbId: number): {
+  async getSessionById(sessionDbId: number): Promise<{
     id: number;
     content_session_id: string;
     memory_session_id: string | null;
     project: string;
     user_prompt: string;
-  } {
-    const session = this.getSessionStore().getSessionById(sessionDbId);
+  }> {
+    const repo = this.getRepository();
+    const session = await repo.sessions.getSessionById(sessionDbId);
     if (!session) {
       throw new Error(`Session ${sessionDbId} not found`);
     }
-    return session;
+    return {
+      id: session.id,
+      content_session_id: session.content_session_id,
+      memory_session_id: session.memory_session_id,
+      project: session.project,
+      user_prompt: session.user_prompt || '',
+    };
   }
 
 }

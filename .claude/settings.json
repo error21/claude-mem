@@ -6,5 +6,20 @@
       "Read(./node_modules/**)",
       "Read(./.DS_Store)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); if echo $f | grep -q '[.]rs$'; then cargo check --quiet 2>&1 | head -20; fi",
+            "timeout": 30,
+            "statusMessage": "Running cargo check..."
+          }
+        ]
+      }
+    ]
   }
 }

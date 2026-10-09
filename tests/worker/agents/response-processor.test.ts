@@ -41,7 +41,11 @@ let loggerSpies: ReturnType<typeof spyOn>[] = [];
 
 describe('ResponseProcessor', () => {
   // Mocks
-  let mockStoreObservations: ReturnType<typeof mock>;
+  let mockStoreObservation: ReturnType<typeof mock>;
+  let mockStoreSummary: ReturnType<typeof mock>;
+  let mockUpdateMemorySessionId: ReturnType<typeof mock>;
+  let mockConfirmProcessed: ReturnType<typeof mock>;
+  let mockWithTransaction: ReturnType<typeof mock>;
   let mockChromaSyncObservation: ReturnType<typeof mock>;
   let mockChromaSyncSummary: ReturnType<typeof mock>;
   let mockBroadcast: ReturnType<typeof mock>;
@@ -49,6 +53,10 @@ describe('ResponseProcessor', () => {
   let mockDbManager: DatabaseManager;
   let mockSessionManager: SessionManager;
   let mockWorker: WorkerRef;
+
+  // Track stored observations and summaries for assertions
+  let storedObservations: any[];
+  let storedSummary: any;
 
   beforeEach(() => {
     // Spy on logger to suppress output
@@ -59,22 +67,54 @@ describe('ResponseProcessor', () => {
       spyOn(logger, 'error').mockImplementation(() => {}),
     ];
 
+    storedObservations = [];
+    storedSummary = null;
+
+    let obsIdCounter = 1;
+
     // Create fresh mocks for each test
-    mockStoreObservations = mock(() => ({
-      observationIds: [1, 2],
-      summaryId: 1,
-      createdAtEpoch: 1700000000000,
-    } as StorageResult));
+    mockStoreObservation = mock((_memorySessionId: string, _project: string, obs: any) => {
+      storedObservations.push(obs);
+      return Promise.resolve({ id: obsIdCounter++, createdAtEpoch: 1700000000000 });
+    });
+
+    mockStoreSummary = mock((_memorySessionId: string, _project: string, summary: any) => {
+      storedSummary = summary;
+      return Promise.resolve({ id: 100, createdAtEpoch: 1700000000000 });
+    });
+
+    mockUpdateMemorySessionId = mock(() => Promise.resolve());
+    mockConfirmProcessed = mock(() => Promise.resolve());
+
+    // withTransaction executes the callback with the same repo mock
+    mockWithTransaction = mock(async (fn: (repo: any) => Promise<any>) => {
+      const txRepo = createMockRepo();
+      return fn(txRepo);
+    });
 
     mockChromaSyncObservation = mock(() => Promise.resolve());
     mockChromaSyncSummary = mock(() => Promise.resolve());
 
+    function createMockRepo() {
+      return {
+        sessions: {
+          updateMemorySessionId: mockUpdateMemorySessionId,
+        },
+        observations: {
+          storeObservation: mockStoreObservation,
+        },
+        summaries: {
+          storeSummary: mockStoreSummary,
+        },
+        pendingMessages: {
+          confirmProcessed: mockConfirmProcessed,
+        },
+        withTransaction: mockWithTransaction,
+      };
+    }
+
     mockDbManager = {
-      getSessionStore: () => ({
-        storeObservations: mockStoreObservations,
-        ensureMemorySessionIdRegistered: mock(() => {}),  // FK fix (Issue #846)
-        getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),  // FK fix (Issue #846)
-      }),
+      getRepository: () => createMockRepo(),
       getChromaSync: () => ({
         syncObservation: mockChromaSyncObservation,
         syncSummary: mockChromaSyncSummary,
@@ -85,12 +125,6 @@ describe('ResponseProcessor', () => {
       getMessageIterator: async function* () {
         yield* [];
       },
-      getPendingMessageStore: () => ({
-        markProcessed: mock(() => {}),
-        confirmProcessed: mock(() => {}),  // CLAIM-CONFIRM pattern: confirm after successful storage
-        cleanupProcessed: mock(() => 0),
-        resetStuckMessages: mock(() => 0),
-      }),
     } as unknown as SessionManager;
 
     mockBroadcast = mock(() => {});
@@ -161,14 +195,15 @@ describe('ResponseProcessor', () => {
         'TestAgent'
       );
 
-      expect(mockStoreObservations).toHaveBeenCalledTimes(1);
-      const [memorySessionId, project, observations, summary] =
-        mockStoreObservations.mock.calls[0];
+      // withTransaction should be called once (atomic storage)
+      expect(mockWithTransaction).toHaveBeenCalledTimes(1);
+      // storeObservation should be called once within the transaction
+      expect(mockStoreObservation).toHaveBeenCalledTimes(1);
+      const [memorySessionId, project, observation] = mockStoreObservation.mock.calls[0];
       expect(memorySessionId).toBe('memory-session-456');
       expect(project).toBe('test-project');
-      expect(observations).toHaveLength(1);
-      expect(observations[0].type).toBe('discovery');
-      expect(observations[0].title).toBe('Found important pattern');
+      expect(observation.type).toBe('discovery');
+      expect(observation.title).toBe('Found important pattern');
     });
 
     it('should parse multiple observations from response', async () => {
@@ -205,10 +240,9 @@ describe('ResponseProcessor', () => {
         'TestAgent'
       );
 
-      const [, , observations] = mockStoreObservations.mock.calls[0];
-      expect(observations).toHaveLength(2);
-      expect(observations[0].type).toBe('discovery');
-      expect(observations[1].type).toBe('bugfix');
+      expect(mockStoreObservation).toHaveBeenCalledTimes(2);
+      expect(storedObservations[0].type).toBe('discovery');
+      expect(storedObservations[1].type).toBe('bugfix');
     });
   });
 
@@ -245,11 +279,11 @@ describe('ResponseProcessor', () => {
         'TestAgent'
       );
 
-      const [, , , summary] = mockStoreObservations.mock.calls[0];
-      expect(summary).not.toBeNull();
-      expect(summary.request).toBe('Build login form');
-      expect(summary.investigated).toBe('Reviewed existing forms');
-      expect(summary.learned).toBe('React Hook Form works well');
+      expect(mockStoreSummary).toHaveBeenCalledTimes(1);
+      expect(storedSummary).not.toBeNull();
+      expect(storedSummary.request).toBe('Build login form');
+      expect(storedSummary.investigated).toBe('Reviewed existing forms');
+      expect(storedSummary.learned).toBe('React Hook Form works well');
     });
 
     it('should handle response without summary', async () => {
@@ -265,18 +299,6 @@ describe('ResponseProcessor', () => {
         </observation>
       `;
 
-      // Mock to return result without summary
-      mockStoreObservations = mock(() => ({
-        observationIds: [1],
-        summaryId: null,
-        createdAtEpoch: 1700000000000,
-      }));
-      (mockDbManager.getSessionStore as any) = () => ({
-        storeObservations: mockStoreObservations,
-        ensureMemorySessionIdRegistered: mock(() => {}),
-        getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
-      });
-
       await processAgentResponse(
         responseText,
         session,
@@ -288,13 +310,13 @@ describe('ResponseProcessor', () => {
         'TestAgent'
       );
 
-      const [, , , summary] = mockStoreObservations.mock.calls[0];
-      expect(summary).toBeNull();
+      expect(mockStoreSummary).not.toHaveBeenCalled();
+      expect(storedSummary).toBeNull();
     });
   });
 
   describe('atomic database transactions', () => {
-    it('should call storeObservations atomically', async () => {
+    it('should use withTransaction for atomic storage', async () => {
       const session = createMockSession();
       const responseText = `
         <observation>
@@ -325,27 +347,52 @@ describe('ResponseProcessor', () => {
         'TestAgent'
       );
 
-      // Verify storeObservations was called exactly once (atomic)
-      expect(mockStoreObservations).toHaveBeenCalledTimes(1);
+      // Verify withTransaction was called exactly once (atomic)
+      expect(mockWithTransaction).toHaveBeenCalledTimes(1);
 
-      // Verify all parameters passed correctly
-      const [
-        memorySessionId,
-        project,
-        observations,
-        summary,
-        promptNumber,
-        tokens,
-        timestamp,
-      ] = mockStoreObservations.mock.calls[0];
-
+      // Verify storeObservation was called with correct params
+      expect(mockStoreObservation).toHaveBeenCalledTimes(1);
+      const [memorySessionId, project, observation, promptNumber, tokens, timestamp] =
+        mockStoreObservation.mock.calls[0];
       expect(memorySessionId).toBe('memory-session-456');
       expect(project).toBe('test-project');
-      expect(observations).toHaveLength(1);
-      expect(summary).not.toBeNull();
+      expect(observation.type).toBe('discovery');
       expect(promptNumber).toBe(5);
       expect(tokens).toBe(100);
       expect(timestamp).toBe(1700000000000);
+
+      // Verify storeSummary was called
+      expect(mockStoreSummary).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('memory session ID registration', () => {
+    it('should call updateMemorySessionId before storage', async () => {
+      const session = createMockSession();
+      const responseText = `
+        <observation>
+          <type>discovery</type>
+          <title>Test</title>
+          <facts></facts>
+          <concepts></concepts>
+          <files_read></files_read>
+          <files_modified></files_modified>
+        </observation>
+      `;
+
+      await processAgentResponse(
+        responseText,
+        session,
+        mockDbManager,
+        mockSessionManager,
+        mockWorker,
+        100,
+        null,
+        'TestAgent'
+      );
+
+      expect(mockUpdateMemorySessionId).toHaveBeenCalledTimes(1);
+      expect(mockUpdateMemorySessionId).toHaveBeenCalledWith(1, 'memory-session-456');
     });
   });
 
@@ -364,18 +411,6 @@ describe('ResponseProcessor', () => {
           <files_modified></files_modified>
         </observation>
       `;
-
-      // Mock returning single observation ID
-      mockStoreObservations = mock(() => ({
-        observationIds: [42],
-        summaryId: null,
-        createdAtEpoch: 1700000000000,
-      }));
-      (mockDbManager.getSessionStore as any) = () => ({
-        storeObservations: mockStoreObservations,
-        ensureMemorySessionIdRegistered: mock(() => {}),
-        getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
-      });
 
       await processAgentResponse(
         responseText,
@@ -396,7 +431,6 @@ describe('ResponseProcessor', () => {
         (call: any[]) => call[0].type === 'new_observation'
       );
       expect(observationCall).toBeDefined();
-      expect(observationCall[0].observation.id).toBe(42);
       expect(observationCall[0].observation.title).toBe('Broadcast Test');
       expect(observationCall[0].observation.type).toBe('discovery');
     });
@@ -446,18 +480,6 @@ describe('ResponseProcessor', () => {
       const session = createMockSession();
       const responseText = '';
 
-      // Mock to handle empty observations
-      mockStoreObservations = mock(() => ({
-        observationIds: [],
-        summaryId: null,
-        createdAtEpoch: 1700000000000,
-      }));
-      (mockDbManager.getSessionStore as any) = () => ({
-        storeObservations: mockStoreObservations,
-        ensureMemorySessionIdRegistered: mock(() => {}),
-        getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
-      });
-
       await processAgentResponse(
         responseText,
         session,
@@ -469,28 +491,17 @@ describe('ResponseProcessor', () => {
         'TestAgent'
       );
 
-      // Should still call storeObservations with empty arrays
-      expect(mockStoreObservations).toHaveBeenCalledTimes(1);
-      const [, , observations, summary] = mockStoreObservations.mock.calls[0];
-      expect(observations).toHaveLength(0);
-      expect(summary).toBeNull();
+      // withTransaction should still be called (atomic)
+      expect(mockWithTransaction).toHaveBeenCalledTimes(1);
+      // No observations to store
+      expect(mockStoreObservation).not.toHaveBeenCalled();
+      expect(mockStoreSummary).not.toHaveBeenCalled();
     });
 
     it('should handle response with only text (no XML)', async () => {
       const session = createMockSession();
       const responseText = 'This is just plain text without any XML tags.';
 
-      mockStoreObservations = mock(() => ({
-        observationIds: [],
-        summaryId: null,
-        createdAtEpoch: 1700000000000,
-      }));
-      (mockDbManager.getSessionStore as any) = () => ({
-        storeObservations: mockStoreObservations,
-        ensureMemorySessionIdRegistered: mock(() => {}),
-        getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
-      });
-
       await processAgentResponse(
         responseText,
         session,
@@ -502,9 +513,8 @@ describe('ResponseProcessor', () => {
         'TestAgent'
       );
 
-      expect(mockStoreObservations).toHaveBeenCalledTimes(1);
-      const [, , observations] = mockStoreObservations.mock.calls[0];
-      expect(observations).toHaveLength(0);
+      expect(mockWithTransaction).toHaveBeenCalledTimes(1);
+      expect(mockStoreObservation).not.toHaveBeenCalled();
     });
   });
 
@@ -523,17 +533,6 @@ describe('ResponseProcessor', () => {
           <files_modified></files_modified>
         </observation>
       `;
-
-      mockStoreObservations = mock(() => ({
-        observationIds: [1],
-        summaryId: null,
-        createdAtEpoch: 1700000000000,
-      }));
-      (mockDbManager.getSessionStore as any) = () => ({
-        storeObservations: mockStoreObservations,
-        ensureMemorySessionIdRegistered: mock(() => {}),
-        getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
-      });
 
       await processAgentResponse(
         responseText,
@@ -562,17 +561,6 @@ describe('ResponseProcessor', () => {
         </observation>
       `;
 
-      mockStoreObservations = mock(() => ({
-        observationIds: [1],
-        summaryId: null,
-        createdAtEpoch: 1700000000000,
-      }));
-      (mockDbManager.getSessionStore as any) = () => ({
-        storeObservations: mockStoreObservations,
-        ensureMemorySessionIdRegistered: mock(() => {}),
-        getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
-      });
-
       await processAgentResponse(
         responseText,
         session,
@@ -585,6 +573,44 @@ describe('ResponseProcessor', () => {
       );
 
       expect(mockBroadcastProcessingStatus).toHaveBeenCalled();
+    });
+  });
+
+  describe('CLAIM-CONFIRM pattern', () => {
+    it('should confirm processing messages after successful storage', async () => {
+      const session = createMockSession({
+        processingMessageIds: [10, 20, 30],
+      });
+      const responseText = `
+        <observation>
+          <type>discovery</type>
+          <title>Test</title>
+          <facts></facts>
+          <concepts></concepts>
+          <files_read></files_read>
+          <files_modified></files_modified>
+        </observation>
+      `;
+
+      await processAgentResponse(
+        responseText,
+        session,
+        mockDbManager,
+        mockSessionManager,
+        mockWorker,
+        100,
+        null,
+        'TestAgent'
+      );
+
+      // Should confirm each processing message
+      expect(mockConfirmProcessed).toHaveBeenCalledTimes(3);
+      expect(mockConfirmProcessed).toHaveBeenCalledWith(10);
+      expect(mockConfirmProcessed).toHaveBeenCalledWith(20);
+      expect(mockConfirmProcessed).toHaveBeenCalledWith(30);
+
+      // Should clear processingMessageIds after confirmation
+      expect(session.processingMessageIds).toHaveLength(0);
     });
   });
 
@@ -603,17 +629,6 @@ describe('ResponseProcessor', () => {
           <files_modified></files_modified>
         </observation>
       `;
-
-      mockStoreObservations = mock(() => ({
-        observationIds: [1],
-        summaryId: null,
-        createdAtEpoch: 1700000000000,
-      }));
-      (mockDbManager.getSessionStore as any) = () => ({
-        storeObservations: mockStoreObservations,
-        ensureMemorySessionIdRegistered: mock(() => {}),
-        getSessionById: mock(() => ({ memory_session_id: 'memory-session-456' })),
-      });
 
       await processAgentResponse(
         responseText,

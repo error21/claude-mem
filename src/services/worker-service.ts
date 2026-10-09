@@ -300,9 +300,35 @@ export class WorkerService {
 
     // Early handler for /api/context/inject — fail open if not yet initialized
     this.server.app.get('/api/context/inject', async (req, res, next) => {
-      if (!this.initializationCompleteFlag || !this.searchRoutes) {
+      if (!this.initializationCompleteFlag) {
         logger.warn('SYSTEM', 'Context requested before initialization complete, returning empty');
         res.status(200).json({ content: [{ type: 'text', text: '' }] });
+        return;
+      }
+
+      // In PostgreSQL mode, searchRoutes is null — handle context inject directly
+      if (!this.searchRoutes) {
+        try {
+          const projectsParam = (req.query.projects as string) || (req.query.project as string);
+          const useColors = req.query.colors === 'true';
+          if (!projectsParam) {
+            res.status(400).json({ error: 'Project(s) parameter is required' });
+            return;
+          }
+          const projects = projectsParam.split(',').map((p: string) => p.trim()).filter(Boolean);
+          const primaryProject = projects[projects.length - 1];
+          const cwd = `/context/${primaryProject}`;
+          const { generateContext } = await import('./context-generator.js');
+          const contextText = await generateContext(
+            { session_id: 'context-inject-' + Date.now(), cwd, projects },
+            useColors
+          );
+          res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+          res.send(contextText);
+        } catch (error) {
+          logger.error('SYSTEM', 'Context generation failed', {}, error as Error);
+          res.status(200).send('');
+        }
         return;
       }
 
@@ -774,9 +800,8 @@ export class WorkerService {
     sessionsSkipped: number;
     startedSessionIds: number[];
   }> {
-    const { PendingMessageStore } = await import('./sqlite/PendingMessageStore.js');
-    const pendingStore = new PendingMessageStore(this.dbManager.getSessionStore().db, 3);
-    const sessionStore = this.dbManager.getSessionStore();
+    // Use storage repository interface (works for both SQLite and PostgreSQL)
+    const repo = this.dbManager.getRepository();
 
     // Clean up stale 'active' sessions before processing
     // Sessions older than 6 hours without activity are likely orphaned
@@ -784,39 +809,35 @@ export class WorkerService {
     const staleThreshold = Date.now() - STALE_SESSION_THRESHOLD_MS;
 
     try {
-      const staleSessionIds = sessionStore.db.prepare(`
-        SELECT id FROM sdk_sessions
-        WHERE status = 'active' AND started_at_epoch < ?
-      `).all(staleThreshold) as { id: number }[];
+      // Find sessions with pending messages, then check each for staleness
+      const allPendingSessionIds = await repo.pendingMessages.getSessionsWithPendingMessages();
+      const staleIds: number[] = [];
 
-      if (staleSessionIds.length > 0) {
-        const ids = staleSessionIds.map(r => r.id);
-        const placeholders = ids.map(() => '?').join(',');
-
-        sessionStore.db.prepare(`
-          UPDATE sdk_sessions
-          SET status = 'failed', completed_at_epoch = ?
-          WHERE id IN (${placeholders})
-        `).run(Date.now(), ...ids);
-
-        logger.info('SYSTEM', `Marked ${ids.length} stale sessions as failed`);
-
-        const msgResult = sessionStore.db.prepare(`
-          UPDATE pending_messages
-          SET status = 'failed', failed_at_epoch = ?
-          WHERE status = 'pending'
-          AND session_db_id IN (${placeholders})
-        `).run(Date.now(), ...ids);
-
-        if (msgResult.changes > 0) {
-          logger.info('SYSTEM', `Marked ${msgResult.changes} pending messages from stale sessions as failed`);
+      for (const sessionDbId of allPendingSessionIds) {
+        const session = await repo.sessions.getSessionById(sessionDbId);
+        if (session && session.status === 'active' && session.started_at_epoch && session.started_at_epoch < staleThreshold) {
+          staleIds.push(sessionDbId);
         }
+      }
+
+      if (staleIds.length > 0) {
+        for (const staleId of staleIds) {
+          const staleSession = await repo.sessions.getSessionById(staleId);
+          if (staleSession) {
+            await repo.sessions.updateSessionStatus(staleSession.content_session_id, 'failed');
+          }
+          const markedFailed = await repo.pendingMessages.markSessionMessagesFailed(staleId);
+          if (markedFailed > 0) {
+            logger.info('SYSTEM', `Marked ${markedFailed} pending messages from stale session ${staleId} as failed`);
+          }
+        }
+        logger.info('SYSTEM', `Marked ${staleIds.length} stale sessions as failed`);
       }
     } catch (error) {
       logger.error('SYSTEM', 'Failed to clean up stale sessions', {}, error as Error);
     }
 
-    const orphanedSessionIds = pendingStore.getSessionsWithPendingMessages();
+    const orphanedSessionIds = await repo.pendingMessages.getSessionsWithPendingMessages();
 
     const result = {
       totalPendingSessions: orphanedSessionIds.length,
@@ -839,10 +860,11 @@ export class WorkerService {
           continue;
         }
 
-        const session = this.sessionManager.initializeSession(sessionDbId);
+        const session = await this.sessionManager.initializeSession(sessionDbId);
+        const pendingCount = await repo.pendingMessages.getPendingCount(sessionDbId);
         logger.info('SYSTEM', `Starting processor for session ${sessionDbId}`, {
           project: session.project,
-          pendingCount: pendingStore.getPendingCount(sessionDbId)
+          pendingCount
         });
 
         this.startSessionProcessor(session, 'startup-recovery');
@@ -887,9 +909,9 @@ export class WorkerService {
   /**
    * Broadcast processing status change to SSE clients
    */
-  broadcastProcessingStatus(): void {
-    const isProcessing = this.sessionManager.isAnySessionProcessing();
-    const queueDepth = this.sessionManager.getTotalActiveWork();
+  async broadcastProcessingStatus(): Promise<void> {
+    const isProcessing = await this.sessionManager.isAnySessionProcessing();
+    const queueDepth = await this.sessionManager.getTotalActiveWork();
     const activeSessions = this.sessionManager.getActiveSessionCount();
 
     logger.info('WORKER', 'Broadcasting processing status', {

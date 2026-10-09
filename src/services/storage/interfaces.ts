@@ -288,15 +288,11 @@ export interface IPromptRepository {
 
   /**
    * Get latest prompt for a session (with session metadata).
+   * Returns full PromptRow for Chroma sync and SSE broadcast.
    */
   getLatestUserPrompt(
     contentSessionId: string
-  ): Promise<{
-    promptNumber: number;
-    promptText: string;
-    memorySessionId: string | null;
-    project: string;
-  } | null>;
+  ): Promise<PromptRow | null>;
 
   /**
    * Get all recent prompts across projects.

@@ -557,26 +557,17 @@ class PostgresPromptRepository implements IPromptRepository {
     return row.count;
   }
 
-  async getLatestUserPrompt(contentSessionId: string): Promise<{
-    promptNumber: number;
-    promptText: string;
-    memorySessionId: string | null;
-    project: string;
-  } | null> {
+  async getLatestUserPrompt(contentSessionId: string): Promise<PromptRow | null> {
     const [row] = await this.sql`
-      SELECT p.prompt_number, p.prompt_text, s.memory_session_id, s.project
+      SELECT p.id, p.content_session_id, p.prompt_number, p.prompt_text,
+             p.created_at, p.created_at_epoch, s.memory_session_id, s.project
       FROM user_prompts p
       JOIN sdk_sessions s ON s.content_session_id = p.content_session_id
       WHERE p.content_session_id = ${contentSessionId}
       ORDER BY p.prompt_number DESC LIMIT 1
     `;
     if (!row) return null;
-    return {
-      promptNumber: row.prompt_number,
-      promptText: row.prompt_text,
-      memorySessionId: row.memory_session_id,
-      project: row.project,
-    };
+    return this.mapRow(row);
   }
 
   async getAllRecentUserPrompts(limit = 50): Promise<PromptRow[]> {

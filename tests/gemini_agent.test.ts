@@ -105,9 +105,26 @@ describe('GeminiAgent', () => {
       syncSummary: mockSyncSummary
     };
 
+    const mockRepo = {
+      sessions: {
+        updateMemorySessionId: mock(() => {}),
+      },
+      observations: {
+        storeObservation: mockStoreObservation,
+      },
+      summaries: {
+        storeSummary: mockStoreSummary,
+      },
+      pendingMessages: {
+        confirmProcessed: mock(() => {}),
+      },
+      withTransaction: mock(async (callback: any) => callback(mockRepo)),
+    };
+
     mockDbManager = {
       getSessionStore: () => mockSessionStore,
-      getChromaSync: () => mockChromaSync
+      getChromaSync: () => mockChromaSync,
+      getRepository: () => mockRepo,
     } as unknown as DatabaseManager;
 
     const mockPendingMessageStore = {
@@ -245,8 +262,8 @@ describe('GeminiAgent', () => {
 
     await agent.startSession(session);
 
-    // ResponseProcessor uses storeObservations (plural) for atomic transactions
-    expect(mockStoreObservations).toHaveBeenCalled();
+    // ResponseProcessor uses repo.withTransaction + txRepo.observations.storeObservation
+    expect(mockStoreObservation).toHaveBeenCalled();
     expect(mockSyncObservation).toHaveBeenCalled();
     expect(session.cumulativeInputTokens).toBeGreaterThan(0);
   });
